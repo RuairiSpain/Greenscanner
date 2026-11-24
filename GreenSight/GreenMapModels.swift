@@ -81,6 +81,11 @@ struct GreenMapRecord: Codable, Identifiable, Sendable {
     var deviceModel: String? = nil
     /// Cup position if the user marked it, in the same frame as the outline.
     var cup: EdgePoint? = nil
+    /// Drift tests: height difference where the walk looped back to its first pass (raw and corrected), and the
+    /// largest tilt correction applied to any pass.
+    var loopClosureMillimetres: Double? = nil
+    var loopClosureResidualMillimetres: Double? = nil
+    var maxTiltPercent: Double? = nil
 
     var edgeVector: [SIMD2<Float>] { edge.map(\.vector) }
 }
@@ -115,6 +120,8 @@ struct MiniMapSnapshot: Equatable, Sendable {
     var noisy: [SIMD2<Float>] = []
     var walkPath: [SIMD2<Float>] = []
     var cup: SIMD2<Float>?
+    var start: SIMD2<Float>?
+    var recovery: SIMD2<Float>?
     var zones: [ZoneStatus] = []
     var highlightZone: Int?
     var cellSize: Float = GreenMapAccumulator.cellSize

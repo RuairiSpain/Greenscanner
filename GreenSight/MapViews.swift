@@ -177,6 +177,15 @@ struct GreenDetailView: View {
                 if let correction = record.maxCorrectionMillimetres {
                     LabeledContent("Largest correction", value: String(format: "%.0f mm", correction))
                 }
+                if let tilt = record.maxTiltPercent {
+                    LabeledContent("Largest tilt correction", value: String(format: "%.2f%%", tilt))
+                }
+                if let loop = record.loopClosureMillimetres {
+                    LabeledContent("Loop closure drift", value: String(format: "%.0f mm", loop)
+                                   + (record.loopClosureResidualMillimetres.map { String(format: " → %.0f mm", $0) } ?? ""))
+                } else if record.zoneCount != nil {
+                    LabeledContent("Loop closure", value: "Not measured")
+                }
                 if let zones = record.zoneCount {
                     LabeledContent("Zones", value: "\(zones)" + ((record.unlinkedZones ?? 0) > 0 ? " (\(record.unlinkedZones ?? 0) unlinked)" : ""))
                 }
@@ -396,6 +405,15 @@ struct MiniMapCells: View, Equatable {
                 }
                 context.stroke(route, with: .color(.cyan.opacity(0.7)), style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
             }
+            if let start = snapshot.start {
+                let p = transform.point(start.x, start.y)
+                context.fill(Path(ellipseIn: CGRect(x: p.x - 4, y: p.y - 4, width: 8, height: 8)), with: .color(.blue))
+                context.stroke(Path(ellipseIn: CGRect(x: p.x - 6, y: p.y - 6, width: 12, height: 12)), with: .color(.white), lineWidth: 1)
+            }
+            if let recovery = snapshot.recovery {
+                let p = transform.point(recovery.x, recovery.y)
+                context.stroke(Path(ellipseIn: CGRect(x: p.x - 6, y: p.y - 6, width: 12, height: 12)), with: .color(.orange), lineWidth: 2.5)
+            }
             if let cup = snapshot.cup {
                 let p = transform.point(cup.x, cup.y)
                 let radius = CGFloat(WalkPlanner.cupKeepOut) * transform.scale
@@ -542,6 +560,13 @@ struct MapScanScreen: View {
                 Text(instruction).font(.subheadline.weight(.semibold))
                 Text("\(model.courseName) · Hole \(model.holeNumber) · \(model.trackingText)")
                     .font(.caption).foregroundStyle(.secondary)
+                if let hint = model.mappingHint {
+                    Text(hint).font(.caption2).foregroundStyle(.secondary)
+                }
+                if model.phase == .scanning, let recovery = model.recoveryGuidance {
+                    Label(recovery, systemImage: "arrow.uturn.backward.circle.fill")
+                        .font(.caption.weight(.semibold)).foregroundStyle(.orange)
+                }
                 if model.phase == .scanning, let advice = model.coachMessage {
                     Label(advice, systemImage: "figure.walk.motion")
                         .font(.caption.weight(.semibold)).foregroundStyle(.orange)
@@ -614,11 +639,20 @@ struct MapScanScreen: View {
                 .font(.caption)
                 if let drift = model.driftMillimetres, drift > 8 {
                     let fixed = model.residualMillimetres.map { String(format: ", corrected to %.0f mm", $0) } ?? ""
-                    Label(String(format: "Height drift about %.0f mm between passes", drift) + fixed + ".",
+                    let tilt = (model.maxTiltPercent ?? 0) >= 0.05 ? String(format: " (tilt up to %.2f%%)", model.maxTiltPercent ?? 0) : ""
+                    Label(String(format: "Height drift about %.0f mm between passes", drift) + fixed + tilt + ".",
                           systemImage: "exclamationmark.triangle.fill")
                         .font(.caption).foregroundStyle((model.residualMillimetres ?? drift) > 8 ? Color.orange : Color.secondary)
                 }
                 walkGuideControls
+                if let loop = model.loopGuidance {
+                    Label(loop, systemImage: "arrow.triangle.2.circlepath")
+                        .font(.caption)
+                        .foregroundStyle(model.loopClosureMillimetres == nil ? Color.blue : Color.secondary)
+                }
+                if model.recoveryGuidance != nil {
+                    Button("Skip re-scan") { model.dismissRecovery() }.buttonStyle(.bordered).font(.caption)
+                }
                 if model.trackingLossCount > 0 {
                     Label("Tracking lost \(model.trackingLossCount) time(s). Revisit those areas.",
                           systemImage: "exclamationmark.triangle.fill")

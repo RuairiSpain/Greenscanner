@@ -36,6 +36,15 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
     @Published var zoneGuidance = "Walk the inside and cover the grey areas on the map."
     @Published var zones: [ZoneStatus] = []
     @Published var coachMessage: String?
+    @Published var recoveryGuidance: String?
+    @Published var loopGuidance: String?
+    @Published var loopClosureMillimetres: Double?
+    @Published var loopClosureResidualMillimetres: Double?
+    @Published var maxTiltPercent: Double?
+    @Published var mappingHint: String?
+    @Published var useWorldMap: Bool {
+        didSet { UserDefaults.standard.set(useWorldMap, forKey: "greensight.useWorldMap") }
+    }
     @Published var walkMode: WalkMode
     @Published var walkPlan: WalkPlan = .empty
     @Published var walkIndex = 0
@@ -81,11 +90,21 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
     private var checkpointInFlight = false
     private var draftGeneration = 0
     private var cupWorld: SIMD3<Float>?
+    private var trail = PositionTrail()
+    private var lastFramePosition: SIMD3<Float>?
+    private var lastFrameTime: Double = 0
+    private var recoveryPoint: SIMD2<Float>?
+    private var recoveryReached = false
+    private var epochCountAtLoss = 0
+    private var latestEpochCount = 0
+    private var startPointLocal: SIMD2<Float>?
+    private var mappingBadSince: Double?
     private var lastMappingStatus: ARFrame.WorldMappingStatus = .notAvailable
     private var lastCoachHaptic: TimeInterval = 0
 
     override init() {
         depthSource = DepthSource(rawValue: UserDefaults.standard.string(forKey: "greensight.depthSource") ?? "") ?? .raw
+        useWorldMap = UserDefaults.standard.object(forKey: "greensight.useWorldMap") as? Bool ?? true
         walkMode = WalkMode(rawValue: UserDefaults.standard.string(forKey: "greensight.walkMode") ?? "") ?? .acrossGreen
         super.init()
         location.onFirstFix = { [weak self] in
@@ -242,6 +261,20 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
         walkGuidance = nil
         cupLocal = nil
         cupWorld = nil
+        recoveryGuidance = nil
+        loopGuidance = nil
+        loopClosureMillimetres = nil
+        loopClosureResidualMillimetres = nil
+        maxTiltPercent = nil
+        mappingHint = nil
+        trail.reset()
+        lastFramePosition = nil
+        recoveryPoint = nil
+        recoveryReached = false
+        epochCountAtLoss = 0
+        latestEpochCount = 0
+        startPointLocal = nil
+        mappingBadSince = nil
         zoneGuidance = "Walk the inside and cover the grey areas on the map."
         trackingLossCount = 0
         minimap = .empty
@@ -334,6 +367,8 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
             view.session.run(configuration)
             if phase != .review { registerTrackingLoss() }
             accumulator.markDiscontinuity()
+            lastFramePosition = nil
+            beginRecovery()
         }
     }
 
@@ -447,7 +482,7 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
         let summary = accumulator.summary()
         let cells = accumulator.exportCells()
         let quality = MapQuality.score(coverage: summary.coverage, goodShare: summary.goodShare,
-                                       driftMillimetres: summary.residualMillimetres ?? summary.driftMillimetres,
+                                       driftMillimetres: worstResidual(summary),
                                        trackingLosses: losses, unlinkedZones: summary.unlinkedZones)
         return GreenMapRecord(
             id: UUID(), courseName: name, holeNumber: hole, createdAt: Date(),
@@ -458,7 +493,10 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
             originLatitude: coordinate?.latitude, originLongitude: coordinate?.longitude,
             zoneCount: summary.zones.count, residualMillimetres: summary.residualMillimetres,
             maxCorrectionMillimetres: summary.maxCorrectionMillimetres, unlinkedZones: summary.unlinkedZones,
-            depthSource: depthSource, deviceModel: DeviceInfo.machine, cup: cup)
+            depthSource: depthSource, deviceModel: DeviceInfo.machine, cup: cup,
+            loopClosureMillimetres: summary.loopClosureMillimetres,
+            loopClosureResidualMillimetres: summary.loopClosureResidualMillimetres,
+            maxTiltPercent: summary.maxTiltPercent)
     }
 
     // MARK: Drafts (resumable scans)
@@ -540,7 +578,7 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
             }
         }
 
-        if let view = arView, lastMappingStatus == .mapped || lastMappingStatus == .extending {
+        if useWorldMap, let view = arView, lastMappingStatus == .mapped || lastMappingStatus == .extending {
             view.session.getCurrentWorldMap { map, _ in write(map) }
         } else {
             write(nil)
@@ -694,8 +732,10 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
         if lastWasNormal, phase != .review {
             trackingLossCount += 1
             accumulator.markDiscontinuity()
+            beginRecovery()
         }
         lastWasNormal = false
+        lastFramePosition = nil
     }
 
     func session(_ session: ARSession, didFailWithError error: Error) {
@@ -722,10 +762,24 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
         let column = frame.camera.transform.columns.3
         let camera = SIMD3<Float>(column.x, column.y, column.z)
 
-        if n.isMultiple(of: 10), !edgeWorld.isEmpty {
-            userPosition = SIMD2<Float>(camera.x - origin.x, camera.z - origin.z)
-            updateWalkProgress()
+        // A camera that moves several metres in a fraction of a second has been relocalised, not walked.
+        if phase == .scanning, let previous = lastFramePosition {
+            let dt = frame.timestamp - lastFrameTime
+            if dt > 0.001, dt < 0.5, simd_distance(camera, previous) / Float(dt) > 4.0 {
+                registerPoseJump()
+            }
         }
+        lastFramePosition = camera
+        lastFrameTime = frame.timestamp
+
+        if n.isMultiple(of: 10), !edgeWorld.isEmpty {
+            let local = SIMD2<Float>(camera.x - origin.x, camera.z - origin.z)
+            userPosition = local
+            if phase == .scanning { trail.add(local, time: frame.timestamp) }
+            updateWalkProgress()
+            updateRecoveryGuidance()
+        }
+        if n.isMultiple(of: 30) { updateMappingHint(timestamp: frame.timestamp) }
 
         switch phase {
         case .edge:
@@ -785,12 +839,25 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
         driftMillimetres = summary.driftMillimetres
         residualMillimetres = summary.residualMillimetres
         maxCorrectionMillimetres = summary.maxCorrectionMillimetres
+        maxTiltPercent = summary.maxTiltPercent
+        loopClosureMillimetres = summary.loopClosureMillimetres
+        loopClosureResidualMillimetres = summary.loopClosureResidualMillimetres
         zones = summary.zones
+        latestEpochCount = summary.epochCount
         let guidance = ZoneGuidance.message(zones: summary.zones, user: userPosition)
         zoneGuidance = guidance.text
         quality = MapQuality.score(coverage: summary.coverage, goodShare: summary.goodShare,
-                                   driftMillimetres: summary.residualMillimetres ?? summary.driftMillimetres,
+                                   driftMillimetres: Self.worstResidual(summary),
                                    trackingLosses: trackingLossCount, unlinkedZones: summary.unlinkedZones)
+
+        if startPointLocal == nil, let start = summary.startPoint {
+            startPointLocal = start
+            renderer?.showStart(SIMD3<Float>(start.x + origin.x, groundY(atLocal: start) + 0.03, start.y + origin.z))
+        }
+        updateLoopGuidance(summary)
+        if recoveryPoint != nil, recoveryReached, summary.latestEpochLinked, summary.epochCount > epochCountAtLoss {
+            finishRecovery(success: true)
+        }
         renderer?.showCoverage(good: good, weak: weak, noisy: noisy, origin: origin)
         checkpoint(force: false)
         publishMinimap(polygon: localPolygon(), closed: true,
@@ -798,13 +865,97 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
                        noisy: noisy.map { SIMD2<Float>($0.x, $0.z) }, zones: summary.zones, highlight: guidance.highlight)
     }
 
+    /// Worst remaining disagreement after correction: between passes, and around the loop.
+    static func worstResidual(_ summary: GreenMapAccumulator.Summary) -> Double? {
+        let values = [summary.residualMillimetres, summary.loopClosureResidualMillimetres].compactMap { $0 }
+        return values.max() ?? summary.driftMillimetres
+    }
+
+    // MARK: Loop closure, recovery and mapping hints
+
+    @MainActor
+    private func updateLoopGuidance(_ summary: GreenMapAccumulator.Summary) {
+        if let raw = summary.loopClosureMillimetres {
+            let fixed = summary.loopClosureResidualMillimetres.map { String(format: ", %.0f mm after correction", $0) } ?? ""
+            loopGuidance = String(format: "Loop closure: %.0f mm of drift around the walk", raw) + fixed + "."
+            return
+        }
+        let allComplete = !summary.zones.isEmpty && summary.zones.allSatisfy { $0.state == .complete }
+        if phase == .scanning, summary.startPoint != nil, summary.epochCount >= 3,
+           summary.coverage >= 0.7 || allComplete {
+            loopGuidance = "Walk back to the blue marker where you started, and scan around it, to measure drift around the loop."
+        } else {
+            loopGuidance = nil
+        }
+    }
+
+    @MainActor
+    private func registerPoseJump() {
+        trackingLossCount += 1
+        accumulator.markDiscontinuity()
+        lastFramePosition = nil
+        beginRecovery()
+    }
+
+    /// After tracking is lost or jumps, ask the walker to re-scan the last few metres so the new pass overlaps the old.
+    @MainActor
+    private func beginRecovery() {
+        guard phase == .scanning else { return }
+        let point = trail.point(distanceBack: 3) ?? userPosition
+        guard let point else { return }
+        recoveryPoint = point
+        recoveryReached = false
+        epochCountAtLoss = latestEpochCount
+        renderer?.showRecovery(SIMD3<Float>(point.x + origin.x, groundY(atLocal: point) + 0.03, point.y + origin.z))
+        recoveryGuidance = "Tracking was interrupted. Walk back to the orange marker and re-scan the last few metres."
+        UINotificationFeedbackGenerator().notificationOccurred(.warning)
+    }
+
+    @MainActor
+    private func updateRecoveryGuidance() {
+        guard let point = recoveryPoint, let user = userPosition else { return }
+        let distance = simd_distance(user, point)
+        if distance < 2.0 { recoveryReached = true }
+        recoveryGuidance = recoveryReached
+            ? "Re-scan around the orange marker until the map links up."
+            : String(format: "Tracking was interrupted. Walk back to the orange marker (%.0f m) and re-scan the last few metres.", distance)
+    }
+
+    @MainActor
+    func dismissRecovery() { finishRecovery(success: false) }
+
+    @MainActor
+    private func finishRecovery(success: Bool) {
+        recoveryPoint = nil
+        recoveryReached = false
+        recoveryGuidance = nil
+        renderer?.showRecovery(nil)
+        if success { UINotificationFeedbackGenerator().notificationOccurred(.success) }
+    }
+
+    /// ARKit builds a world map as the camera sees varied surroundings. Without it a saved scan cannot be resumed.
+    @MainActor
+    private func updateMappingHint(timestamp: Double) {
+        guard useWorldMap, phase == .edge || phase == .scanning else { mappingHint = nil; return }
+        switch lastMappingStatus {
+        case .mapped, .extending:
+            mappingBadSince = nil
+            mappingHint = nil
+        default:
+            if mappingBadSince == nil { mappingBadSince = timestamp }
+            if let since = mappingBadSince, timestamp - since > 20 {
+                mappingHint = "ARKit has little to map yet. Occasionally look up at trees, fences or buildings so this scan can be resumed later."
+            }
+        }
+    }
+
     @MainActor
     private func publishMinimap(polygon: [SIMD2<Float>], closed: Bool, good: [SIMD2<Float>], weak: [SIMD2<Float>],
                                 noisy: [SIMD2<Float>] = [], zones: [ZoneStatus] = [], highlight: Int? = nil) {
         minimapVersion += 1
         minimap = MiniMapSnapshot(version: minimapVersion, polygon: polygon, closed: closed, good: good, weak: weak,
-                                  noisy: noisy, walkPath: walkPlan.path, cup: cupLocal,
-                                  zones: zones, highlightZone: highlight)
+                                  noisy: noisy, walkPath: walkPlan.path, cup: cupLocal, start: startPointLocal,
+                                  recovery: recoveryPoint, zones: zones, highlightZone: highlight)
     }
 
     // MARK: Walking guide
@@ -886,6 +1037,8 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
         snapshot.version = minimapVersion
         snapshot.walkPath = walkPlan.path
         snapshot.cup = cupLocal
+        snapshot.start = startPointLocal
+        snapshot.recovery = recoveryPoint
         minimap = snapshot
     }
 

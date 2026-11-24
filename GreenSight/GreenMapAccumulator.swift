@@ -49,6 +49,17 @@ final class GreenMapAccumulator: @unchecked Sendable {
         /// The same spread after the epoch offsets are applied.
         let residualMillimetres: Double?
         let maxCorrectionMillimetres: Double?
+        /// Largest tilt correction applied to any pass, as percent grade.
+        let maxTiltPercent: Double?
+        /// Height difference where the walk returned to ground it covered in its first pass (needs a pass index
+        /// of 2 or more): before and after correction, in millimetres. Nil until the walk has looped back.
+        let loopClosureMillimetres: Double?
+        let loopClosureResidualMillimetres: Double?
+        /// Where scanning began, in map-local metres.
+        let startPoint: SIMD2<Float>?
+        /// True when the newest pass shares enough cells with the rest of the scan to be corrected.
+        let latestEpochLinked: Bool
+        let epochCount: Int
         let zones: [ZoneStatus]
         var coverage: Double { Double(good + weak + noisy) / Double(max(total, 1)) }
         var goodShare: Double { good + weak + noisy == 0 ? 0 : Double(good) / Double(good + weak + noisy) }
@@ -68,6 +79,9 @@ final class GreenMapAccumulator: @unchecked Sendable {
     static let zoneCompletion = 0.9
     /// Epochs are linked when they share at least this many cells.
     static let minimumSharedCells = 8
+    /// Penalty on per-pass tilt, in the solver's weight units (about a 1% grade prior).
+    static let tiltPrior = 0.5
+    static let maximumTilt: Float = 0.03
 
     private let lock = NSLock()
     private var scanID: UUID?
@@ -87,11 +101,18 @@ final class GreenMapAccumulator: @unchecked Sendable {
     private var discontinuity = false
 
     private var dirty = false
-    private var offsets: [Float] = []
+    /// Per pass: vertical offset (m) and tilt (m per m) in x and z, about `planeCentre`.
+    private var planes: [SIMD3<Float>] = []
+    private var planeCentre = SIMD2<Float>.zero
     private var epochLinked: [Bool] = []
+    private var epochStartTimes: [Double] = []
+    private var startPoint: SIMD2<Float>?
     private var rawDrift: Double?
     private var residualDrift: Double?
     private var maxCorrection: Double?
+    private var maxTilt: Double?
+    private var loopRaw: Double?
+    private var loopResidual: Double?
 
     // MARK: Configuration
 
@@ -109,9 +130,13 @@ final class GreenMapAccumulator: @unchecked Sendable {
         epochStart = 0
         currentZone = -1
         discontinuity = false
-        offsets = []
+        planes = []
         epochLinked = []
+        epochStartTimes = []
+        startPoint = nil
         rawDrift = nil; residualDrift = nil; maxCorrection = nil
+        maxTilt = nil; loopRaw = nil; loopResidual = nil
+        if let bounds = GreenGeometry.bounds(polygon) { planeCentre = (bounds.min + bounds.max) / 2 }
         dirty = false
         totalInside = 0
         guard let bounds = GreenGeometry.bounds(polygon) else { return }
@@ -231,6 +256,7 @@ final class GreenMapAccumulator: @unchecked Sendable {
         let cells: [CellState]
         let epochZones: [Int]
         let currentZone: Int
+        var startPoint: SIMD2<Float>? = nil
     }
 
     func snapshot() -> Snapshot? {
@@ -239,7 +265,8 @@ final class GreenMapAccumulator: @unchecked Sendable {
         let states = cells.map { key, cell in
             Snapshot.CellState(ix: key.x, iz: key.y, entries: cell.entries, count: cell.count, minRange: cell.minRange)
         }
-        return Snapshot(polygon: polygon, origin: origin, cells: states, epochZones: epochZones, currentZone: currentZone)
+        return Snapshot(polygon: polygon, origin: origin, cells: states, epochZones: epochZones,
+                        currentZone: currentZone, startPoint: startPoint)
     }
 
     /// Restores a saved scan. The next observations start a new epoch, so the drift solver ties them to
@@ -251,6 +278,8 @@ final class GreenMapAccumulator: @unchecked Sendable {
             cells[SIMD2<Int32>(state.ix, state.iz)] = Cell(entries: state.entries, count: state.count, minRange: state.minRange)
         }
         epochZones = snapshot.epochZones
+        epochStartTimes = [Double](repeating: 0, count: snapshot.epochZones.count)
+        startPoint = snapshot.startPoint
         currentZone = snapshot.currentZone
         discontinuity = true
         dirty = true
@@ -264,7 +293,7 @@ final class GreenMapAccumulator: @unchecked Sendable {
         discontinuity = true
     }
 
-    private func epoch(forCamera camera: SIMD2<Float>, timestamp: Double) -> Int32 {
+    private func epochIndex(forCamera camera: SIMD2<Float>, timestamp: Double) -> Int32 {
         var zone = max(currentZone, 0)
         if zoneCentres.count > 1 {
             var best = 0
@@ -285,7 +314,9 @@ final class GreenMapAccumulator: @unchecked Sendable {
             || timestamp - epochStart > Self.maxEpochDuration
         if needNew {
             if epochZones.count < Self.maxEpochs {
+                if epochZones.isEmpty { startPoint = camera }
                 epochZones.append(zone)
+                epochStartTimes.append(timestamp)
                 epochStart = timestamp
             }
             discontinuity = false
@@ -294,17 +325,25 @@ final class GreenMapAccumulator: @unchecked Sendable {
         return Int32(max(epochZones.count - 1, 0))
     }
 
-    private func offset(for epoch: Int32) -> Float {
-        let index = Int(epoch)
-        return index < offsets.count ? offsets[index] : 0
+    private func centre(of key: SIMD2<Int32>) -> SIMD2<Float> {
+        SIMD2<Float>((Float(key.x) + 0.5) * Self.cellSize, (Float(key.y) + 0.5) * Self.cellSize)
     }
 
-    private func correctedMean(_ cell: Cell) -> Float {
+    /// Height correction for a pass at a map-local position: offset plus tilt about the green's centre.
+    private func correction(epoch: Int32, at position: SIMD2<Float>) -> Float {
+        let index = Int(epoch)
+        guard index < planes.count else { return 0 }
+        let plane = planes[index]
+        return plane.x + plane.y * (position.x - planeCentre.x) + plane.z * (position.y - planeCentre.y)
+    }
+
+    private func correctedMean(_ cell: Cell, key: SIMD2<Int32>) -> Float {
+        let position = centre(of: key)
         var weight: Float = 0
         var weighted: Float = 0
         for entry in cell.entries {
             weight += entry.sumWeight
-            weighted += entry.sumWeightedHeight + entry.sumWeight * offset(for: entry.epoch)
+            weighted += entry.sumWeightedHeight + entry.sumWeight * correction(epoch: entry.epoch, at: position)
         }
         return weighted / max(weight, 0.001)
     }
@@ -353,8 +392,7 @@ final class GreenMapAccumulator: @unchecked Sendable {
         guard bins.contains(where: { $0.value.heights.count >= 3 }) else { return }
 
         let cameraLocal = camera - origin
-        let epoch = epoch(forCamera: SIMD2<Float>(cameraLocal.x, cameraLocal.z), timestamp: timestamp)
-        let epochOffset = offset(for: epoch)
+        let epoch = epochIndex(forCamera: SIMD2<Float>(cameraLocal.x, cameraLocal.z), timestamp: timestamp)
 
         for (key, bin) in bins {
             guard bin.heights.count >= 3 else { continue }
@@ -366,7 +404,7 @@ final class GreenMapAccumulator: @unchecked Sendable {
 
             var cell = cells[key] ?? Cell(entries: [], count: 0, minRange: .greatestFiniteMagnitude)
             if cell.count >= Self.minimumObservations,
-               abs(height + epochOffset - correctedMean(cell)) > 0.08 { continue }
+               abs(height + correction(epoch: epoch, at: SIMD2<Float>(centreX, centreZ)) - correctedMean(cell, key: key)) > 0.08 { continue }
 
             if let index = cell.entries.firstIndex(where: { $0.epoch == epoch }) {
                 cell.entries[index].sumWeight += weight
@@ -390,14 +428,17 @@ final class GreenMapAccumulator: @unchecked Sendable {
         guard dirty else { return }
         dirty = false
         let n = epochZones.count
-        guard n > 0 else { offsets = []; epochLinked = []; return }
+        guard n > 0 else { planes = []; epochLinked = []; return }
 
-        var matrix = [Double](repeating: 0, count: n * n)
-        var rhs = [Double](repeating: 0, count: n)
+        // Unknowns per pass: vertical offset and tilt in x and z (3 each). Eliminating each cell's true height
+        // leaves a weighted Laplacian over the passes that observed it.
+        let m = 3 * n
+        var matrix = [Double](repeating: 0, count: m * m)
+        var rhs = [Double](repeating: 0, count: m)
         var shared: [Int: Int] = [:]
-        var multiCells: [Cell] = []
+        var multiCells: [(key: SIMD2<Int32>, cell: Cell)] = []
 
-        for cell in cells.values where cell.entries.count >= 2 {
+        for (key, cell) in cells where cell.entries.count >= 2 {
             let entries = cell.entries
             var weights: [Double] = []
             var heights: [Double] = []
@@ -409,28 +450,48 @@ final class GreenMapAccumulator: @unchecked Sendable {
                 total += w
             }
             guard total > 0 else { continue }
-            multiCells.append(cell)
+            multiCells.append((key, cell))
+            let position = centre(of: key)
+            let phi = SIMD3<Double>(1, Double(position.x - planeCentre.x), Double(position.y - planeCentre.y))
             for i in entries.indices {
                 let ei = Int(entries[i].epoch)
                 var accumulated = 0.0
                 for j in entries.indices {
                     let ej = Int(entries[j].epoch)
                     let laplacian = (i == j ? weights[i] : 0) - weights[i] * weights[j] / total
-                    matrix[ei * n + ej] += laplacian
+                    for r in 0..<3 {
+                        for c in 0..<3 { matrix[(3 * ei + r) * m + 3 * ej + c] += laplacian * phi[r] * phi[c] }
+                    }
                     accumulated += laplacian * heights[j]
                     if i < j { shared[min(ei, ej) * n + max(ei, ej), default: 0] += 1 }
                 }
-                rhs[ei] -= accumulated
+                for r in 0..<3 { rhs[3 * ei + r] -= accumulated * phi[r] }
             }
         }
 
-        // Pin the first epoch; a tiny ridge keeps disconnected epochs at zero offset.
-        for i in 0..<n { matrix[i * n + i] += 1e-3 }
-        matrix[0] += 1e6
-        let solved = Self.solveLinear(matrix, rhs, n: n) ?? [Double](repeating: 0, count: n)
-        offsets = solved.map { $0.isFinite ? Float($0) : 0 }
+        func solve(allowTilt: Bool) -> [SIMD3<Float>] {
+            var a = matrix
+            for i in 0..<n {
+                a[(3 * i) * m + 3 * i] += 1e-3                       // keeps unconnected passes at zero offset
+                // Prior on tilt: about 1% grade, so weakly constrained passes stay flat.
+                a[(3 * i + 1) * m + 3 * i + 1] += allowTilt ? Self.tiltPrior : 1e6
+                a[(3 * i + 2) * m + 3 * i + 2] += allowTilt ? Self.tiltPrior : 1e6
+            }
+            for r in 0..<3 { a[r * m + r] += 1e6 }                    // pin the first pass completely
+            let solved = Self.solveLinear(a, rhs, n: m) ?? [Double](repeating: 0, count: m)
+            return (0..<n).map { i in
+                func value(_ k: Int) -> Float { solved[3 * i + k].isFinite ? Float(solved[3 * i + k]) : 0 }
+                return SIMD3<Float>(value(0), value(1), value(2))
+            }
+        }
+        var solution = solve(allowTilt: true)
+        // A tilt above 3% is more likely a poor fit than real drift: fall back to offsets only.
+        if solution.contains(where: { abs($0.y) > Self.maximumTilt || abs($0.z) > Self.maximumTilt }) {
+            solution = solve(allowTilt: false)
+        }
+        planes = solution
 
-        // Epochs sharing enough cells are linked; the component of epoch 0 is the reference.
+        // Passes sharing enough cells are linked; the component of the first pass is the reference.
         var parent = Array(0..<n)
         func find(_ x: Int) -> Int {
             var root = x
@@ -445,21 +506,34 @@ final class GreenMapAccumulator: @unchecked Sendable {
         epochLinked = (0..<n).map { find($0) == reference }
 
         var raw: [Float] = [], residual: [Float] = []
-        for cell in multiCells {
+        var loopRawValues: [Float] = [], loopFixedValues: [Float] = []
+        for (key, cell) in multiCells {
+            let position = centre(of: key)
             var lowRaw = Float.infinity, highRaw = -Float.infinity
             var lowFixed = Float.infinity, highFixed = -Float.infinity
+            var firstPass: (raw: Float, fixed: Float)?
+            var latestPass: (epoch: Int32, raw: Float, fixed: Float)?
             for entry in cell.entries {
                 let h = entry.sumWeightedHeight / max(entry.sumWeight, 0.001)
-                let fixed = h + offset(for: entry.epoch)
+                let fixed = h + correction(epoch: entry.epoch, at: position)
                 lowRaw = min(lowRaw, h); highRaw = max(highRaw, h)
                 lowFixed = min(lowFixed, fixed); highFixed = max(highFixed, fixed)
+                if entry.epoch == 0 { firstPass = (h, fixed) }
+                if entry.epoch >= 2, entry.epoch > (latestPass?.epoch ?? -1) { latestPass = (entry.epoch, h, fixed) }
             }
             raw.append(highRaw - lowRaw)
             residual.append(highFixed - lowFixed)
+            if let firstPass, let latestPass {
+                loopRawValues.append(abs(latestPass.raw - firstPass.raw))
+                loopFixedValues.append(abs(latestPass.fixed - firstPass.fixed))
+            }
         }
         rawDrift = raw.count >= 20 ? Double(median(raw)) * 1000 : nil
         residualDrift = residual.count >= 20 ? Double(median(residual)) * 1000 : nil
-        maxCorrection = offsets.isEmpty ? nil : Double(offsets.map { abs($0) }.max() ?? 0) * 1000
+        loopRaw = loopRawValues.count >= 15 ? Double(median(loopRawValues)) * 1000 : nil
+        loopResidual = loopFixedValues.count >= 15 ? Double(median(loopFixedValues)) * 1000 : nil
+        maxCorrection = planes.isEmpty ? nil : Double(planes.map { abs($0.x) }.max() ?? 0) * 1000
+        maxTilt = planes.isEmpty ? nil : Double(planes.map { ($0.y * $0.y + $0.z * $0.z).squareRoot() }.max() ?? 0) * 100
     }
 
     /// Gaussian elimination with partial pivoting.
@@ -514,7 +588,10 @@ final class GreenMapAccumulator: @unchecked Sendable {
                                     coveredCount: covered[index], state: state, linked: linked))
         }
         return Summary(good: good, weak: weak, noisy: noisy, total: totalInside, driftMillimetres: rawDrift,
-                       residualMillimetres: residualDrift, maxCorrectionMillimetres: maxCorrection, zones: zones)
+                       residualMillimetres: residualDrift, maxCorrectionMillimetres: maxCorrection,
+                       maxTiltPercent: maxTilt, loopClosureMillimetres: loopRaw,
+                       loopClosureResidualMillimetres: loopResidual, startPoint: startPoint,
+                       latestEpochLinked: epochLinked.last ?? false, epochCount: epochZones.count, zones: zones)
     }
 
     /// Tile centres (local metres, drift-corrected heights) for rendering and the minimap.
@@ -524,7 +601,7 @@ final class GreenMapAccumulator: @unchecked Sendable {
         let size = Self.cellSize
         var good: [MapTile] = [], weak: [MapTile] = [], noisy: [MapTile] = []
         for (key, cell) in cells where cell.count >= Self.minimumObservations {
-            let tile = MapTile(x: (Float(key.x) + 0.5) * size, z: (Float(key.y) + 0.5) * size, y: correctedMean(cell))
+            let tile = MapTile(x: (Float(key.x) + 0.5) * size, z: (Float(key.y) + 0.5) * size, y: correctedMean(cell, key: key))
             switch quality(of: cell) {
             case .good: good.append(tile)
             case .weak: weak.append(tile)
@@ -540,7 +617,7 @@ final class GreenMapAccumulator: @unchecked Sendable {
         refreshIfNeeded()
         let raw: [MapCell] = cells.compactMap { key, cell in
             guard cell.count >= Self.minimumObservations else { return nil }
-            return MapCell(ix: Int(key.x), iz: Int(key.y), height: correctedMean(cell),
+            return MapCell(ix: Int(key.x), iz: Int(key.y), height: correctedMean(cell, key: key),
                            observations: cell.count, bestRange: cell.minRange, noise: noise(of: cell))
         }.sorted { ($0.iz, $0.ix) < ($1.iz, $1.ix) }
         lock.unlock()

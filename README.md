@@ -182,3 +182,11 @@ While scanning, a "Walk guide" control plans where to walk:
 - **Off** shows no route.
 
 Progress advances as the walker comes within 1.2 m of the next few waypoints, and the guide says when the walker is off the route. The app has no data about other players' balls or lines; the guide only keeps clear of the cup surround and reminds the user not to walk another player's line. Check the course rules before walking on a green.
+
+### Drift and tracking (v1.9)
+
+- **Tilt correction.** The drift solver now estimates, for each scan pass, a vertical offset plus a tilt in x and z (3 unknowns per pass), with a weak prior (about 1% grade) so passes with little overlap stay flat. Tilts over 3% are rejected and the solve repeats with offsets only. The largest tilt applied is saved with the scan.
+- **Horizontal drift is not corrected.** On a smooth green a horizontal shift of a few centimetres changes heights by about a millimetre, and a uniform slope makes a shift indistinguishable from the vertical offset that is already corrected, so it cannot be estimated reliably from heights. Instead the app detects pose jumps (camera speed above 4 m/s) and treats them like a tracking loss.
+- **Loop closure.** Scanning start is marked with a blue pole in AR and on the minimap. Once the walk is well covered, the app asks the walker to return and scan around it. Cells seen in the first pass and again in pass 3 or later give the loop closure error, before and after correction, saved with the scan. The loop also tightens the correction, since those cells link the last pass back to the first.
+- **Tracking recovery.** After a tracking loss, session resume or pose jump, an orange marker is placed about 3 m back along the walked path with a prompt to re-scan from there. The prompt clears once the newest pass is linked to the rest of the scan, or when skipped.
+- **World map.** Resuming scans from earlier versions already uses the ARKit world map. It can now be turned off in Settings (smaller, faster saves; interrupted scans can then only be saved as captured), and the app prompts the walker to look at varied surroundings when ARKit's map stays poor for 20 s.

@@ -15,6 +15,8 @@ final class MapRenderer {
     private var walkEntity: ModelEntity?
     private var walkMarker: ModelEntity?
     private var cupEntity: ModelEntity?
+    private var startEntity: ModelEntity?
+    private var recoveryEntity: ModelEntity?
 
     private let edgeMaterial = SimpleMaterial(color: .white, isMetallic: false)
     private let pointMaterial = SimpleMaterial(color: .systemMint, isMetallic: false)
@@ -42,6 +44,8 @@ final class MapRenderer {
         walkEntity = nil
         walkMarker = nil
         cupEntity = nil
+        startEntity = nil
+        recoveryEntity = nil
         view = nil
     }
 
@@ -106,6 +110,26 @@ final class MapRenderer {
     }
 
     func clearWalkRoute() { showWalkRoute([]) }
+
+    /// Blue pole where scanning began, so the walker can return to it to close the loop.
+    func showStart(_ position: SIMD3<Float>?) {
+        startEntity = pole(replacing: startEntity, at: position, color: .systemBlue)
+    }
+
+    /// Orange pole at the spot to return to after tracking was lost.
+    func showRecovery(_ position: SIMD3<Float>?) {
+        recoveryEntity = pole(replacing: recoveryEntity, at: position, color: .systemOrange)
+    }
+
+    private func pole(replacing old: ModelEntity?, at position: SIMD3<Float>?, color: UIColor) -> ModelEntity? {
+        old?.removeFromParent()
+        guard let position else { return nil }
+        let pole = ModelEntity(mesh: .generateCylinder(height: 1.2, radius: 0.04),
+                               materials: [SimpleMaterial(color: color, isMetallic: false)])
+        pole.position = position + SIMD3<Float>(0, 0.6, 0)
+        root?.addChild(pole)
+        return pole
+    }
 
     /// Red disc marking the area around the cup that the route stays out of.
     func showCup(_ position: SIMD3<Float>?, keepOutRadius: Float) {

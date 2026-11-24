@@ -259,6 +259,80 @@ final class GreenSightTests: XCTestCase {
         XCTAssertEqual(decoded.edge.count, 4)
     }
 
+    // MARK: Drift: tilt, loop closure, recovery
+
+    func testPassTiltAndOffsetAreBothCorrected() {
+        let accumulator = GreenMapAccumulator()
+        let id = UUID()
+        accumulator.configure(polygon: longGreen, origin: .zero, scanID: id)
+        for step in 0..<4 {
+            accumulator.ingest(block(x: 0.01...8, z: 0.01...5.99, height: 0), camera: SIMD3<Float>(3, 1.5, 3),
+                               timestamp: Double(step), scanID: id)
+        }
+        // The second pass drifted by 0.02 m plus a 1% tilt across z.
+        for step in 0..<4 {
+            var samples = block(x: 6.01...13.99, z: 0.01...5.99, height: 0)
+            samples = samples.map { WorldSample(position: SIMD3<Float>($0.position.x, 0.02 + 0.01 * ($0.position.z - 3), $0.position.z),
+                                                weight: $0.weight) }
+            accumulator.ingest(samples, camera: SIMD3<Float>(11, 1.5, 3), timestamp: 5 + Double(step), scanID: id)
+        }
+        let summary = accumulator.summary()
+        XCTAssertEqual(summary.maxTiltPercent ?? 0, 1.0, accuracy: 0.2)
+        XCTAssertLessThan(summary.residualMillimetres ?? 99, 3)
+        for cell in accumulator.exportCells(smooth: false) {
+            XCTAssertEqual(cell.height, 0, accuracy: 0.004)
+        }
+    }
+
+    func testLoopClosureMeasuresDriftAroundTheWalk() {
+        let accumulator = GreenMapAccumulator()
+        let id = UUID()
+        accumulator.configure(polygon: longGreen, origin: .zero, scanID: id)
+        for step in 0..<4 {
+            accumulator.ingest(block(x: 0.01...8, z: 0.01...5.99, height: 0), camera: SIMD3<Float>(3, 1.5, 3),
+                               timestamp: Double(step), scanID: id)
+        }
+        for step in 0..<4 {
+            accumulator.ingest(block(x: 6.01...13.99, z: 0.01...5.99, height: 0.01), camera: SIMD3<Float>(11, 1.5, 3),
+                               timestamp: 5 + Double(step), scanID: id)
+        }
+        // Back at the start, 0.025 m higher than the first pass saw the same ground.
+        for step in 0..<4 {
+            accumulator.ingest(block(x: 0.01...8, z: 0.01...5.99, height: 0.025), camera: SIMD3<Float>(3, 1.5, 3),
+                               timestamp: 100 + Double(step), scanID: id)
+        }
+        let before = accumulator.summary()
+        XCTAssertEqual(before.epochCount, 3)
+        XCTAssertEqual(before.startPoint?.x ?? 0, 3, accuracy: 0.01)
+        XCTAssertEqual(before.loopClosureMillimetres ?? 0, 25, accuracy: 3)
+        XCTAssertLessThan(before.loopClosureResidualMillimetres ?? 99, 3)
+        XCTAssertTrue(before.latestEpochLinked)
+    }
+
+    func testNoLoopClosureWithoutRevisit() {
+        let accumulator = GreenMapAccumulator()
+        let id = UUID()
+        accumulator.configure(polygon: longGreen, origin: .zero, scanID: id)
+        for step in 0..<4 {
+            accumulator.ingest(block(x: 0.01...8, z: 0.01...5.99, height: 0), camera: SIMD3<Float>(3, 1.5, 3),
+                               timestamp: Double(step), scanID: id)
+        }
+        XCTAssertNil(accumulator.summary().loopClosureMillimetres)
+    }
+
+    func testTrailFindsPointThreeMetresBack() throws {
+        var trail = PositionTrail()
+        for step in 0...10 { trail.add(SIMD2<Float>(Float(step), 0), time: Double(step)) }
+        let back = try XCTUnwrap(trail.point(distanceBack: 3))
+        XCTAssertEqual(back.x, 7, accuracy: 0.001)
+        // A shorter trail returns its oldest point.
+        var short = PositionTrail()
+        short.add(SIMD2<Float>(0, 0), time: 0)
+        short.add(SIMD2<Float>(1, 0), time: 1)
+        XCTAssertEqual(try XCTUnwrap(short.point(distanceBack: 3)).x, 0, accuracy: 0.001)
+        XCTAssertNil(PositionTrail().point(distanceBack: 3))
+    }
+
     // MARK: Walking guide
 
     private let wideGreen: [SIMD2<Float>] = [SIMD2(0, 0), SIMD2(14, 0), SIMD2(14, 6), SIMD2(0, 6)]

@@ -35,10 +35,11 @@ struct SettingsView: View {
                     Picker("Depth source", selection: $mapModel.depthSource) {
                         ForEach(DepthSource.allCases) { Text($0.label).tag($0) }
                     }
+                    Toggle("Save ARKit world map for resuming", isOn: $mapModel.useWorldMap)
                 } header: {
                     Text("Map a Green")
                 } footer: {
-                    Text("Smoothed depth is filtered over time and may be quieter but lag behind movement. The choice is saved with each scan so you can compare them in the validation report.")
+                    Text("Smoothed depth is filtered over time and may be quieter but lag behind movement. The choice is saved with each scan so you can compare them in the validation report. Saving the world map lets an interrupted scan be resumed in the same place, but the files are larger and each save takes more work; with it off, an interrupted scan can only be saved as captured.")
                 }
                 Section("Measurement limits") {
                     Label("Requires an iPhone or iPad exposing ARKit scene depth.", systemImage: "sensor.tag.radiowaves.forward")
@@ -52,7 +53,7 @@ struct SettingsView: View {
                     Text("Camera and depth frames are processed on-device. Saved reads contain reconstructed surface cells and calculated paths—not photos or video.")
                 }
                 Section("About") {
-                    LabeledContent("Version", value: "1.8 (9)")
+                    LabeledContent("Version", value: "1.9 (10)")
                     LabeledContent("Grid", value: "30 mm")
                     LabeledContent("Physics", value: "Rolling sphere + Stimp drag")
                 }

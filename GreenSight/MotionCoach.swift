@@ -67,3 +67,32 @@ struct MotionCoach {
         return advice
     }
 }
+
+/// Recent walker positions (map-local x, z), used to find where to return to after tracking is lost.
+struct PositionTrail {
+    private(set) var points: [(position: SIMD2<Float>, time: Double)] = []
+    static let capacity = 40
+
+    mutating func add(_ position: SIMD2<Float>, time: Double) {
+        points.append((position, time))
+        if points.count > Self.capacity { points.removeFirst(points.count - Self.capacity) }
+    }
+
+    mutating func reset() { points.removeAll() }
+
+    /// The point about `distance` metres back along the walked path, or the oldest point if the trail is shorter.
+    func point(distanceBack distance: Float) -> SIMD2<Float>? {
+        guard var current = points.last?.position else { return nil }
+        var travelled: Float = 0
+        for entry in points.reversed().dropFirst() {
+            let step = simd_distance(current, entry.position)
+            if travelled + step >= distance {
+                let t = step > 0 ? (distance - travelled) / step : 0
+                return current + (entry.position - current) * t
+            }
+            travelled += step
+            current = entry.position
+        }
+        return current
+    }
+}
