@@ -42,6 +42,8 @@ struct MapCell: Codable, Sendable {
 struct EdgePoint: Codable, Sendable {
     let x: Float
     let z: Float
+    /// Height in metres relative to the first edge point, when known, so the border can be drawn in 3D.
+    var y: Float? = nil
     var vector: SIMD2<Float> { SIMD2<Float>(x, z) }
 }
 
@@ -57,13 +59,13 @@ struct GreenMapRecord: Codable, Identifiable, Sendable {
     var holeNumber: Int
     let createdAt: Date
     let cellSize: Float
-    let edge: [EdgePoint]
-    let cells: [MapCell]
-    let coverage: Double
-    let qualityScore: Double
+    var edge: [EdgePoint]
+    var cells: [MapCell]
+    var coverage: Double
+    var qualityScore: Double
     let driftMillimetres: Double?
     let trackingLossCount: Int
-    let isPartial: Bool
+    var isPartial: Bool
     let headingAligned: Bool
     let originLatitude: Double?
     let originLongitude: Double?
@@ -86,6 +88,10 @@ struct GreenMapRecord: Codable, Identifiable, Sendable {
     var loopClosureMillimetres: Double? = nil
     var loopClosureResidualMillimetres: Double? = nil
     var maxTiltPercent: Double? = nil
+    /// Cells in the 1 m strip just outside the outline, kept so the outline can be refined or edited later.
+    var outerCells: [MapCell]? = nil
+    /// How the outline was made: "walked", "refined" (snapped to detected fringe) or "edited" (by hand).
+    var edgeSource: String? = nil
 
     var edgeVector: [SIMD2<Float>] { edge.map(\.vector) }
 }

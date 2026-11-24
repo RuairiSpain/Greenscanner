@@ -30,6 +30,20 @@ enum GreenGeometry {
         return inside
     }
 
+    /// Distance from a point to the nearest edge of a closed polygon.
+    static func distance(from point: SIMD2<Float>, toBoundaryOf polygon: [SIMD2<Float>]) -> Float {
+        guard polygon.count >= 2 else { return .infinity }
+        var best = Float.infinity
+        for index in polygon.indices {
+            let a = polygon[index], b = polygon[(index + 1) % polygon.count]
+            let ab = b - a
+            let lengthSquared = simd_dot(ab, ab)
+            let t = lengthSquared > 1e-12 ? (simd_dot(point - a, ab) / lengthSquared).clamped(to: 0...1) : 0
+            best = min(best, simd_distance(point, a + ab * t))
+        }
+        return best
+    }
+
     static func bounds(_ polygon: [SIMD2<Float>]) -> (min: SIMD2<Float>, max: SIMD2<Float>)? {
         guard var low = polygon.first else { return nil }
         var high = low

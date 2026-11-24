@@ -491,14 +491,17 @@ enum GreenMerger {
         let quality = (coverage * (totalCells > 0 ? weighted / totalCells : 0)).clamped(to: 0...1)
         let residualMM = residuals.isEmpty ? nil : Double(residuals.max() ?? 0) * 1000
 
+        let outlineHeights = GreenEdit.edgeHeights(polygon: union.outline, pool: cells, cellSize: size)
         let record = GreenMapRecord(
             id: UUID(), courseName: reference.courseName, holeNumber: reference.holeNumber, createdAt: Date(),
-            cellSize: size, edge: union.outline.map { EdgePoint(x: $0.x, z: $0.y) }, cells: cells,
+            cellSize: size,
+            edge: union.outline.enumerated().map { EdgePoint(x: $0.element.x, z: $0.element.y, y: outlineHeights[$0.offset]) },
+            cells: cells,
             coverage: coverage, qualityScore: quality, driftMillimetres: residualMM,
             trackingLossCount: used.reduce(0) { $0 + $1.trackingLossCount },
             isPartial: coverage < 0.85, headingAligned: reference.headingAligned,
             originLatitude: reference.originLatitude, originLongitude: reference.originLongitude,
-            sourceIDs: used.map(\.id), sourceScanCount: used.count)
+            sourceIDs: used.map(\.id), sourceScanCount: used.count, edgeSource: "merged")
         return MergeResult(record: record, usedCount: used.count, skipped: skipped,
                            residualMillimetres: residualMM, minimumOverlap: Double(lowestOverlap))
     }

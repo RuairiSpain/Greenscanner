@@ -259,6 +259,122 @@ final class GreenSightTests: XCTestCase {
         XCTAssertEqual(decoded.edge.count, 4)
     }
 
+    // MARK: Edge refinement, editing and heights
+
+    private let walkedOutline: [SIMD2<Float>] = [SIMD2(0, 0), SIMD2(14, 0), SIMD2(14, 10), SIMD2(0, 10)]
+
+    /// Cells inside and within 1 m outside the walked outline. Texture is rough beyond `trueMargin` metres outside it.
+    private func edgeFixture(trueMargin: Float?) -> (cells: [MapCell], outer: [MapCell]) {
+        var cells: [MapCell] = [], outer: [MapCell] = []
+        for ix in -6..<76 {
+            for iz in -6..<56 {
+                let centre = SIMD2<Float>((Float(ix) + 0.5) * 0.2, (Float(iz) + 0.5) * 0.2)
+                let inside = GreenGeometry.contains(walkedOutline, point: centre)
+                let distance = GreenGeometry.distance(from: centre, toBoundaryOf: walkedOutline)
+                guard inside || distance <= 1.0 else { continue }
+                var rough = false
+                if let trueMargin { rough = !inside && distance > trueMargin }
+                let noise = (rough ? 0.010 : 0.003) + 0.0004 * Float(sin(Double(ix) * 12.9 + Double(iz) * 78.2))
+                let cell = MapCell(ix: ix, iz: iz, height: 0.01 * centre.x, observations: 10, bestRange: 1.5, noise: noise)
+                if inside { cells.append(cell) } else { outer.append(cell) }
+            }
+        }
+        return (cells, outer)
+    }
+
+    func testRefinerFindsFringeBeyondWalkedOutline() throws {
+        let data = edgeFixture(trueMargin: 0.4)
+        let suggestion = try XCTUnwrap(EdgeRefiner.suggest(edge: walkedOutline, cells: data.cells, outerCells: data.outer, cellSize: 0.2))
+        XCTAssertTrue(suggestion.isUseful)
+        XCTAssertGreaterThan(suggestion.detectedFraction, 0.8)
+        XCTAssertEqual(suggestion.medianShiftMetres, 0.4, accuracy: 0.15)
+        // Truth is a 14.8 x 10.8 m green.
+        XCTAssertEqual(GreenGeometry.area(suggestion.polygon), 159.8, accuracy: 15)
+        XCTAssertFalse(GreenGeometry.selfIntersects(suggestion.polygon))
+    }
+
+    func testRefinerLeavesGoodOutlineAlone() throws {
+        let data = edgeFixture(trueMargin: nil)
+        let suggestion = try XCTUnwrap(EdgeRefiner.suggest(edge: walkedOutline, cells: data.cells, outerCells: data.outer, cellSize: 0.2))
+        XCTAssertFalse(suggestion.isUseful)
+        XCTAssertEqual(GreenGeometry.area(suggestion.polygon), 140, accuracy: 8)
+    }
+
+    func testRefinerNeedsEnoughData() {
+        XCTAssertNil(EdgeRefiner.suggest(edge: walkedOutline, cells: [], outerCells: [], cellSize: 0.2))
+    }
+
+    private func editableRecord() -> GreenMapRecord {
+        let data = edgeFixture(trueMargin: nil)
+        return GreenMapRecord(id: UUID(), courseName: "Edit", holeNumber: 3, createdAt: Date(), cellSize: 0.2,
+                              edge: walkedOutline.map { EdgePoint(x: $0.x, z: $0.y) }, cells: data.cells, coverage: 1,
+                              qualityScore: 0.8, driftMillimetres: nil, trackingLossCount: 0, isPartial: false,
+                              headingAligned: true, originLatitude: nil, originLongitude: nil, outerCells: data.outer)
+    }
+
+    func testApplyingWiderOutlinePullsCellsFromOuterStrip() throws {
+        let record = editableRecord()
+        let wider: [SIMD2<Float>] = [SIMD2(-0.6, -0.6), SIMD2(14.6, -0.6), SIMD2(14.6, 10.6), SIMD2(-0.6, 10.6)]
+        let updated = try XCTUnwrap(GreenEdit.apply(to: record, polygon: wider, source: "edited"))
+        XCTAssertGreaterThan(updated.cells.count, record.cells.count)
+        XCTAssertEqual(updated.edgeSource, "edited")
+        XCTAssertEqual(updated.coverage, 1, accuracy: 0.05)
+        XCTAssertTrue(updated.edge.allSatisfy { $0.y != nil })
+        // The surface is 0.01 m per metre of x, so heights at the corners follow it.
+        XCTAssertEqual(updated.edge[1].y ?? 0, 0.146, accuracy: 0.02)
+        // Nothing is lost: cutting back to the original outline restores the first cell count.
+        let restored = try XCTUnwrap(GreenEdit.apply(to: updated, polygon: walkedOutline, source: "edited"))
+        XCTAssertEqual(restored.cells.count, record.cells.count)
+    }
+
+    func testApplyingSmallerOutlineLowersCellsAndCoverageIsRecomputed() throws {
+        let record = editableRecord()
+        let smaller: [SIMD2<Float>] = [SIMD2(2, 2), SIMD2(12, 2), SIMD2(12, 8), SIMD2(2, 8)]
+        let updated = try XCTUnwrap(GreenEdit.apply(to: record, polygon: smaller, source: "edited"))
+        XCTAssertLessThan(updated.cells.count, record.cells.count)
+        XCTAssertEqual(updated.coverage, 1, accuracy: 0.05)
+        XCTAssertGreaterThan(updated.outerCells?.count ?? 0, 0)
+    }
+
+    func testEditValidationRejectsBadOutlines() {
+        XCTAssertNotNil(GreenEdit.validate([SIMD2(0, 0), SIMD2(1, 1)]))
+        XCTAssertNotNil(GreenEdit.validate([SIMD2(0, 0), SIMD2(1, 0), SIMD2(1, 1)]))
+        XCTAssertNotNil(GreenEdit.validate([SIMD2(0, 0), SIMD2(10, 10), SIMD2(10, 0), SIMD2(0, 10)]))
+        XCTAssertNil(GreenEdit.validate(walkedOutline))
+        XCTAssertNil(GreenEdit.apply(to: editableRecord(), polygon: [SIMD2(0, 0), SIMD2(1, 1)], source: "edited"))
+    }
+
+    func testEdgePointHeightRoundTripsAndOldFilesDecode() throws {
+        let point = EdgePoint(x: 1, z: 2, y: 0.05)
+        let decoded = try JSONDecoder().decode(EdgePoint.self, from: JSONEncoder().encode(point))
+        XCTAssertEqual(decoded.y ?? 0, 0.05, accuracy: 1e-7)
+        let old = try JSONDecoder().decode(EdgePoint.self, from: Data(#"{"x":1,"z":2}"#.utf8))
+        XCTAssertNil(old.y)
+    }
+
+    func testDistanceToPolygonBoundary() {
+        XCTAssertEqual(GreenGeometry.distance(from: SIMD2<Float>(5, -2), toBoundaryOf: walkedOutline), 2, accuracy: 1e-5)
+        XCTAssertEqual(GreenGeometry.distance(from: SIMD2<Float>(7, 1), toBoundaryOf: walkedOutline), 1, accuracy: 1e-5)
+    }
+
+    func testAccumulatorKeepsStripOutsideOutlineButNotInCoverage() {
+        let accumulator = GreenMapAccumulator()
+        let id = UUID()
+        accumulator.configure(polygon: square, origin: .zero, scanID: id)
+        // Samples cover 0...6 m; the outline is 0...4, so 4...5 is the kept strip and 5...6 is ignored.
+        for step in 0..<4 {
+            accumulator.ingest(block(x: 0.01...5.99, z: 0.01...3.99, height: 0), camera: SIMD3<Float>(2, 1.5, 2),
+                               timestamp: Double(step), scanID: id)
+        }
+        let summary = accumulator.summary()
+        XCTAssertEqual(summary.total, 400)
+        XCTAssertGreaterThan(summary.coverage, 0.95)
+        let band = accumulator.exportBandCells()
+        XCTAssertGreaterThan(band.count, 20)
+        XCTAssertTrue(band.allSatisfy { Float($0.ix) * 0.2 >= 3.99 && Float($0.ix) * 0.2 < 5.01 })
+        XCTAssertEqual(accumulator.exportCells(smooth: false).count, summary.good + summary.weak + summary.noisy)
+    }
+
     // MARK: Drift: tilt, loop closure, recovery
 
     func testPassTiltAndOffsetAreBothCorrected() {

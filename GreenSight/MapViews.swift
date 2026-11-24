@@ -197,6 +197,17 @@ struct GreenDetailView: View {
                     LabeledContent("Merged from", value: "\(count) scans")
                 }
             }
+            Section("Outline") {
+                NavigationLink {
+                    EdgeEditorView(record: record)
+                } label: {
+                    Label("Edit outline", systemImage: "point.topleft.down.curvedto.point.bottomright.up")
+                }
+                if let source = record.edgeSource {
+                    LabeledContent("Outline", value: source == "walked" ? "Walked" : source.capitalized)
+                }
+                LabeledContent("Edge heights stored", value: (record.edge.allSatisfy { $0.y != nil }) ? "Yes" : "Partly")
+            }
             ValidationSection(record: record)
             if let url = exportURL {
                 Section { ShareLink(item: url) { Label("Export green file", systemImage: "square.and.arrow.up") } }
@@ -305,17 +316,253 @@ struct ValidationSection: View {
     }
 }
 
+// MARK: Outline editor
+
+/// Drag outline points, add points by dragging a midpoint, delete points, or snap to the detected fringe.
+struct EdgeEditorView: View {
+    @EnvironmentObject private var model: MapModel
+    @Environment(\.dismiss) private var dismiss
+    let record: GreenMapRecord
+
+    @State private var polygon: [SIMD2<Float>] = []
+    @State private var undoStack: [[SIMD2<Float>]] = []
+    @State private var selected: Int?
+    @State private var dragIndex: Int?
+    @State private var dragStarted = false
+    @State private var message: String?
+    @State private var preview: (cells: Int, coverage: Double)?
+    @State private var detecting = false
+
+    private struct Layout {
+        let bounds: (min: SIMD2<Float>, max: SIMD2<Float>)
+        let scale: CGFloat
+        let offset: CGPoint
+        func point(_ p: SIMD2<Float>) -> CGPoint {
+            CGPoint(x: offset.x + CGFloat(p.x - bounds.min.x) * scale, y: offset.y + CGFloat(p.y - bounds.min.y) * scale)
+        }
+        func map(_ p: CGPoint) -> SIMD2<Float> {
+            SIMD2<Float>(Float((p.x - offset.x) / scale) + bounds.min.x, Float((p.y - offset.y) / scale) + bounds.min.y)
+        }
+    }
+
+    /// The layout stays fixed while editing: it is based on the saved outline and the cells around it.
+    private func layout(for size: CGSize) -> Layout? {
+        let extra = record.cells.isEmpty ? [] : (record.outerCells ?? []).map {
+            SIMD2<Float>((Float($0.ix) + 0.5) * record.cellSize, (Float($0.iz) + 0.5) * record.cellSize)
+        }
+        guard let b = GreenGeometry.bounds(record.edgeVector + extra) else { return nil }
+        let span = b.max - b.min
+        let scale = min((size.width - 24) / CGFloat(max(span.x, 0.5)), (size.height - 24) / CGFloat(max(span.y, 0.5)))
+        let offset = CGPoint(x: (size.width - CGFloat(span.x) * scale) / 2, y: (size.height - CGFloat(span.y) * scale) / 2)
+        return Layout(bounds: b, scale: scale, offset: offset)
+    }
+
+    var body: some View {
+        VStack(spacing: 10) {
+            GeometryReader { proxy in
+                let grades = MapSlope.grades(cells: record.cells + (record.outerCells ?? []), cellSize: record.cellSize)
+                Canvas { context, size in
+                    guard let layout = layout(for: size) else { return }
+                    let cells = record.cells + (record.outerCells ?? [])
+                    let side = CGFloat(record.cellSize) * layout.scale
+                    for (index, cell) in cells.enumerated() {
+                        let p = layout.point(SIMD2<Float>(Float(cell.ix) * record.cellSize, Float(cell.iz) * record.cellSize))
+                        context.fill(Path(CGRect(x: p.x, y: p.y, width: side + 0.5, height: side + 0.5)),
+                                     with: .color(MapSlopeView.color(grade: Double(grades[index])).opacity(0.85)))
+                    }
+                    var outline = Path()
+                    for (index, vertex) in polygon.enumerated() {
+                        let p = layout.point(vertex)
+                        if index == 0 { outline.move(to: p) } else { outline.addLine(to: p) }
+                    }
+                    outline.closeSubpath()
+                    context.stroke(outline, with: .color(.white), lineWidth: 2)
+                    for index in polygon.indices {
+                        let a = layout.point(polygon[index]), b = layout.point(polygon[(index + 1) % polygon.count])
+                        let mid = CGPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2)
+                        context.fill(Path(ellipseIn: CGRect(x: mid.x - 3, y: mid.y - 3, width: 6, height: 6)), with: .color(.white.opacity(0.6)))
+                    }
+                    for (index, vertex) in polygon.enumerated() {
+                        let p = layout.point(vertex)
+                        let radius: CGFloat = index == selected ? 9 : 7
+                        let dot = Path(ellipseIn: CGRect(x: p.x - radius, y: p.y - radius, width: radius * 2, height: radius * 2))
+                        context.fill(dot, with: .color(index == selected ? .orange : .white))
+                        context.stroke(dot, with: .color(.black), lineWidth: 1)
+                    }
+                }
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0)
+                    .onChanged { value in handleDrag(value, size: proxy.size) }
+                    .onEnded { _ in endDrag() })
+            }
+            .background(.black.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
+            .frame(minHeight: 320)
+
+            if let message {
+                Label(message, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.orange)
+            }
+            if let preview {
+                Text("\(preview.cells) cells inside · \(preview.coverage.formatted(.percent.precision(.fractionLength(0)))) of the outline scanned")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Text("Drag a point to move it. Drag a small dot on an edge to add a point. Select a point and delete it with the button.")
+                .font(.caption2).foregroundStyle(.secondary)
+            HStack {
+                Button { undo() } label: { Label("Undo", systemImage: "arrow.uturn.backward") }
+                    .disabled(undoStack.isEmpty)
+                Button { deleteSelected() } label: { Label("Delete point", systemImage: "trash") }
+                    .disabled(selected == nil || polygon.count <= 3)
+                Button { detectFringe() } label: { Label(detecting ? "Detecting…" : "Detect fringe", systemImage: "scribble.variable") }
+                    .disabled(detecting)
+            }
+            .buttonStyle(.bordered)
+            .font(.caption)
+            HStack {
+                Button("Reset", role: .destructive) { reset() }.buttonStyle(.bordered)
+                Spacer()
+                Button("Apply") { apply() }.buttonStyle(.borderedProminent).tint(.mint)
+            }
+        }
+        .padding()
+        .navigationTitle("Edit outline")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear { if polygon.isEmpty { polygon = record.edgeVector; refreshPreview() } }
+    }
+
+    // MARK: Gestures
+
+    private func handleDrag(_ value: DragGesture.Value, size: CGSize) {
+        guard let layout = layout(for: size) else { return }
+        if !dragStarted {
+            dragStarted = true
+            let start = value.startLocation
+            if let vertex = polygon.indices.min(by: { distance(layout.point(polygon[$0]), start) < distance(layout.point(polygon[$1]), start) }),
+               distance(layout.point(polygon[vertex]), start) < 28 {
+                pushUndo()
+                dragIndex = vertex
+                selected = vertex
+            } else if let edge = polygon.indices.min(by: { midpoint($0, layout) .distance(to: start) < midpoint($1, layout).distance(to: start) }),
+                      midpoint(edge, layout).distance(to: start) < 24 {
+                pushUndo()
+                polygon.insert(layout.map(midpoint(edge, layout)), at: edge + 1)
+                dragIndex = edge + 1
+                selected = edge + 1
+            }
+        }
+        if let dragIndex, polygon.indices.contains(dragIndex) {
+            polygon[dragIndex] = layout.map(value.location)
+        }
+    }
+
+    private func endDrag() {
+        dragStarted = false
+        dragIndex = nil
+        message = GreenEdit.validate(polygon)
+        refreshPreview()
+    }
+
+    private func midpoint(_ index: Int, _ layout: Layout) -> CGPoint {
+        let a = layout.point(polygon[index]), b = layout.point(polygon[(index + 1) % polygon.count])
+        return CGPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2)
+    }
+
+    private func distance(_ a: CGPoint, _ b: CGPoint) -> CGFloat { hypot(a.x - b.x, a.y - b.y) }
+
+    // MARK: Actions
+
+    private func pushUndo() {
+        undoStack.append(polygon)
+        if undoStack.count > 50 { undoStack.removeFirst() }
+    }
+
+    private func undo() {
+        guard let last = undoStack.popLast() else { return }
+        polygon = last
+        selected = nil
+        message = GreenEdit.validate(polygon)
+        refreshPreview()
+    }
+
+    private func deleteSelected() {
+        guard let index = selected, polygon.count > 3, polygon.indices.contains(index) else { return }
+        pushUndo()
+        polygon.remove(at: index)
+        selected = nil
+        message = GreenEdit.validate(polygon)
+        refreshPreview()
+    }
+
+    private func reset() {
+        pushUndo()
+        polygon = record.edgeVector
+        selected = nil
+        message = nil
+        refreshPreview()
+    }
+
+    private func refreshPreview() {
+        guard GreenEdit.validate(polygon) == nil else { preview = nil; return }
+        let pool = record.cells + (record.outerCells ?? [])
+        let size = record.cellSize
+        let inside = pool.filter {
+            GreenGeometry.contains(polygon, point: SIMD2<Float>((Float($0.ix) + 0.5) * size, (Float($0.iz) + 0.5) * size))
+        }.count
+        let total = max(GreenEdit.cellCount(inside: polygon, cellSize: size), 1)
+        preview = (inside, min(1, Double(inside) / Double(total)))
+    }
+
+    private func detectFringe() {
+        detecting = true
+        let record = self.record
+        let current = polygon
+        Task {
+            let suggestion = await Task.detached(priority: .userInitiated) {
+                EdgeRefiner.suggest(edge: current, cells: record.cells, outerCells: record.outerCells ?? [],
+                                    cellSize: record.cellSize)
+            }.value
+            detecting = false
+            guard let suggestion, suggestion.isUseful else {
+                message = "No clear fringe was found in the scan data."
+                return
+            }
+            pushUndo()
+            polygon = suggestion.polygon
+            selected = nil
+            message = nil
+            refreshPreview()
+        }
+    }
+
+    private func apply() {
+        if let problem = GreenEdit.validate(polygon) { message = problem; return }
+        let source = polygon.count == record.edge.count && zip(polygon, record.edgeVector).allSatisfy({ $0 == $1 }) ? record.edgeSource : "edited"
+        guard let updated = GreenEdit.apply(to: record, polygon: polygon, source: source ?? "edited") else {
+            message = "The outline could not be applied."
+            return
+        }
+        model.replaceRecord(updated)
+        dismiss()
+    }
+}
+
+private extension CGPoint {
+    func distance(to other: CGPoint) -> CGFloat { hypot(x - other.x, y - other.y) }
+}
+
+
 // MARK: Slope view
 
 struct MapSlopeView: View {
     let record: GreenMapRecord
+    /// Optional second outline drawn dashed in cyan, for example a suggested fringe.
+    var overlayOutline: [SIMD2<Float>]? = nil
 
     var body: some View {
         let grades = MapSlope.grades(cells: record.cells, cellSize: record.cellSize)
         VStack(spacing: 6) {
             Canvas { context, size in
                 let polygon = record.edgeVector
-                guard let bounds = GreenGeometry.bounds(polygon) else { return }
+                guard let bounds = GreenGeometry.bounds(polygon + (overlayOutline ?? [])) else { return }
                 let span = bounds.max - bounds.min
                 let scale = Double(min((size.width - 16) / CGFloat(max(span.x, 0.1)),
                                        (size.height - 16) / CGFloat(max(span.y, 0.1))))
@@ -337,6 +584,15 @@ struct MapSlopeView: View {
                 }
                 outline.closeSubpath()
                 context.stroke(outline, with: .color(.white), lineWidth: 2)
+                if let overlay = overlayOutline, overlay.count >= 3 {
+                    var suggested = Path()
+                    for (index, vertex) in overlay.enumerated() {
+                        let p = point(vertex.x, vertex.y)
+                        if index == 0 { suggested.move(to: p) } else { suggested.addLine(to: p) }
+                    }
+                    suggested.closeSubpath()
+                    context.stroke(suggested, with: .color(.cyan), style: StrokeStyle(lineWidth: 2.5, dash: [6, 4]))
+                }
                 if let cup = record.cup {
                     let p = point(cup.x, cup.z)
                     context.stroke(Path(ellipseIn: CGRect(x: p.x - 7, y: p.y - 7, width: 14, height: 14)),
@@ -706,10 +962,20 @@ struct MapScanScreen: View {
         VStack(spacing: 12) {
             if let record = model.reviewRecord {
                 Text("\(record.courseName) · Hole \(record.holeNumber)").font(.headline)
-                ScrollView { MapSlopeView(record: record) }
+                ScrollView { MapSlopeView(record: record, overlayOutline: model.edgeSuggestion?.polygon) }
                 HStack {
                     stat("Coverage", record.coverage)
                     stat("Quality", record.qualityScore)
+                }
+                if let suggestion = model.edgeSuggestion {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label(String(format: "The scan shows rougher grass beyond your outline along %.0f%% of the edge (typically %.0f cm out). The dashed cyan line follows it.",
+                                     suggestion.detectedFraction * 100, suggestion.medianShiftMetres * 100),
+                              systemImage: "scribble.variable")
+                            .font(.caption)
+                        Button("Use the detected edge") { model.acceptEdgeSuggestion() }
+                            .buttonStyle(.bordered).font(.caption)
+                    }
                 }
                 if let unlinked = record.unlinkedZones, unlinked > 0 {
                     Label("\(unlinked) zone(s) are not tied to the rest of the scan, so their heights are uncorrected.",

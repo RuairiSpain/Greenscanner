@@ -36,6 +36,7 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
     @Published var zoneGuidance = "Walk the inside and cover the grey areas on the map."
     @Published var zones: [ZoneStatus] = []
     @Published var coachMessage: String?
+    @Published var edgeSuggestion: EdgeSuggestion?
     @Published var recoveryGuidance: String?
     @Published var loopGuidance: String?
     @Published var loopClosureMillimetres: Double?
@@ -457,7 +458,7 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
         phase = .review
         reviewRecord = nil
         let accumulator = self.accumulator
-        let edge = localPolygon().map { EdgePoint(x: $0.x, z: $0.y) }
+        let edge = edgeWorld.map { EdgePoint(x: $0.x - origin.x, z: $0.z - origin.z, y: $0.y - origin.y) }
         let name = courseName, hole = holeNumber
         let losses = trackingLossCount
         let aligned = headingAligned
@@ -469,9 +470,12 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
             let record = Self.buildRecord(accumulator: accumulator, edge: edge, name: name, hole: hole,
                                           losses: losses, aligned: aligned, coordinate: coordinate,
                                           depthSource: depthSourceName, cup: cupPoint)
+            let suggestion = EdgeRefiner.suggest(edge: record.edgeVector, cells: record.cells,
+                                                 outerCells: record.outerCells ?? [], cellSize: record.cellSize)
             DispatchQueue.main.async {
                 guard let self, self.scanID == currentScan, self.phase == .review else { return }
                 self.reviewRecord = record
+                self.edgeSuggestion = (suggestion?.isUseful == true) ? suggestion : nil
             }
         }
     }
@@ -481,12 +485,17 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
                                         depthSource: String, cup: EdgePoint? = nil) -> GreenMapRecord {
         let summary = accumulator.summary()
         let cells = accumulator.exportCells()
+        let outerCells = accumulator.exportBandCells()
         let quality = MapQuality.score(coverage: summary.coverage, goodShare: summary.goodShare,
                                        driftMillimetres: worstResidual(summary),
                                        trackingLosses: losses, unlinkedZones: summary.unlinkedZones)
+        // Prefer heights read from the scanned surface (drift-corrected) over those taken when the point was marked.
+        let surfaceHeights = GreenEdit.edgeHeights(polygon: edge.map(\.vector), pool: cells + outerCells,
+                                                   cellSize: GreenMapAccumulator.cellSize)
+        let edgeWithHeights = edge.enumerated().map { EdgePoint(x: $0.element.x, z: $0.element.z, y: surfaceHeights[$0.offset] ?? $0.element.y) }
         return GreenMapRecord(
             id: UUID(), courseName: name, holeNumber: hole, createdAt: Date(),
-            cellSize: GreenMapAccumulator.cellSize, edge: edge, cells: cells,
+            cellSize: GreenMapAccumulator.cellSize, edge: edgeWithHeights, cells: cells,
             coverage: summary.coverage, qualityScore: quality,
             driftMillimetres: summary.driftMillimetres, trackingLossCount: losses,
             isPartial: summary.coverage < 0.85, headingAligned: aligned,
@@ -496,7 +505,7 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
             depthSource: depthSource, deviceModel: DeviceInfo.machine, cup: cup,
             loopClosureMillimetres: summary.loopClosureMillimetres,
             loopClosureResidualMillimetres: summary.loopClosureResidualMillimetres,
-            maxTiltPercent: summary.maxTiltPercent)
+            maxTiltPercent: summary.maxTiltPercent, outerCells: outerCells, edgeSource: "walked")
     }
 
     // MARK: Drafts (resumable scans)
@@ -648,7 +657,9 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
             }
             let recovered = GreenMapAccumulator()
             recovered.restore(snapshot, scanID: UUID())
-            let edge = payload.edgeWorld.map { EdgePoint(x: $0.x - payload.origin.x, z: $0.z - payload.origin.z) }
+            let edge = payload.edgeWorld.map {
+                EdgePoint(x: $0.x - payload.origin.x, z: $0.z - payload.origin.z, y: $0.y - payload.origin.y)
+            }
             let coordinate: CLLocationCoordinate2D? = {
                 guard let lat = payload.originLatitude, let lon = payload.originLongitude else { return nil }
                 return CLLocationCoordinate2D(latitude: lat, longitude: lon)
@@ -682,9 +693,28 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
         recoverDraftAsGreen()
     }
 
+    /// Replaces the reviewed outline with the one snapped to the detected fringe.
+    @MainActor
+    func acceptEdgeSuggestion() {
+        guard let record = reviewRecord, let suggestion = edgeSuggestion,
+              let updated = GreenEdit.apply(to: record, polygon: suggestion.polygon, source: "refined") else { return }
+        reviewRecord = updated
+        edgeSuggestion = nil
+    }
+
+    /// Saves an edited version of an existing green over the original.
+    @MainActor
+    func replaceRecord(_ record: GreenMapRecord) {
+        guard let index = records.firstIndex(where: { $0.id == record.id }) else { return }
+        records[index] = record
+        let store = self.store
+        persistenceQueue.async { store.save(record) }
+    }
+
     @MainActor
     func resumeScanning() {
         guard phase == .review else { return }
+        edgeSuggestion = nil
         reviewRecord = nil
         phase = .scanning
     }

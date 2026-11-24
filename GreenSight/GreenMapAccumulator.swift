@@ -69,6 +69,8 @@ final class GreenMapAccumulator: @unchecked Sendable {
     static let cellSize: Float = 0.2
     /// Observations from farther than this are flagged as weak (amber).
     static let goodRange: Float = 2.5
+    /// Width of the strip outside the outline whose cells are kept.
+    static let bandWidth: Float = 1.0
     /// Frame-to-frame height standard deviation above this marks a cell as noisy.
     static let noisyThreshold: Float = 0.008
     static let minimumObservations = 3
@@ -89,6 +91,9 @@ final class GreenMapAccumulator: @unchecked Sendable {
     private var origin = SIMD3<Float>.zero
     private var cells: [SIMD2<Int32>: Cell] = [:]
     private var insideCache: [SIMD2<Int32>: Bool] = [:]
+    /// Cells just outside the outline, kept so the edge can be refined or moved later. Not part of coverage.
+    private var bandCells: [SIMD2<Int32>: Cell] = [:]
+    private var bandCache: [SIMD2<Int32>: Bool] = [:]
     private var totalInside = 0
 
     private var zoneOfCell: [SIMD2<Int32>: Int] = [:]
@@ -123,6 +128,8 @@ final class GreenMapAccumulator: @unchecked Sendable {
         self.scanID = scanID
         cells.removeAll(keepingCapacity: true)
         insideCache.removeAll(keepingCapacity: true)
+        bandCells.removeAll(keepingCapacity: true)
+        bandCache.removeAll(keepingCapacity: true)
         zoneOfCell.removeAll()
         zoneCentres = []
         zoneCellCounts = []
@@ -161,6 +168,14 @@ final class GreenMapAccumulator: @unchecked Sendable {
         let inside = GreenGeometry.contains(polygon, point: centre)
         insideCache[key] = inside
         return inside
+    }
+
+    private func isBand(_ key: SIMD2<Int32>) -> Bool {
+        if let cached = bandCache[key] { return cached }
+        let inBand = !isInside(key)
+            && GreenGeometry.distance(from: centre(of: key), toBoundaryOf: polygon) <= Self.bandWidth
+        bandCache[key] = inBand
+        return inBand
     }
 
     private func buildZones(keys: [SIMD2<Int32>]) {
@@ -257,6 +272,7 @@ final class GreenMapAccumulator: @unchecked Sendable {
         let epochZones: [Int]
         let currentZone: Int
         var startPoint: SIMD2<Float>? = nil
+        var bandCells: [CellState]? = nil
     }
 
     func snapshot() -> Snapshot? {
@@ -265,8 +281,11 @@ final class GreenMapAccumulator: @unchecked Sendable {
         let states = cells.map { key, cell in
             Snapshot.CellState(ix: key.x, iz: key.y, entries: cell.entries, count: cell.count, minRange: cell.minRange)
         }
+        let bandStates = bandCells.map { key, cell in
+            Snapshot.CellState(ix: key.x, iz: key.y, entries: cell.entries, count: cell.count, minRange: cell.minRange)
+        }
         return Snapshot(polygon: polygon, origin: origin, cells: states, epochZones: epochZones,
-                        currentZone: currentZone, startPoint: startPoint)
+                        currentZone: currentZone, startPoint: startPoint, bandCells: bandStates)
     }
 
     /// Restores a saved scan. The next observations start a new epoch, so the drift solver ties them to
@@ -276,6 +295,9 @@ final class GreenMapAccumulator: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         for state in snapshot.cells {
             cells[SIMD2<Int32>(state.ix, state.iz)] = Cell(entries: state.entries, count: state.count, minRange: state.minRange)
+        }
+        for state in snapshot.bandCells ?? [] {
+            bandCells[SIMD2<Int32>(state.ix, state.iz)] = Cell(entries: state.entries, count: state.count, minRange: state.minRange)
         }
         epochZones = snapshot.epochZones
         epochStartTimes = [Double](repeating: 0, count: snapshot.epochZones.count)
@@ -383,7 +405,7 @@ final class GreenMapAccumulator: @unchecked Sendable {
             let x = sample.position.x - origin.x
             let z = sample.position.z - origin.z
             let key = SIMD2<Int32>(Int32(floor(x / size)), Int32(floor(z / size)))
-            guard isInside(key) else { continue }
+            guard isInside(key) || isBand(key) else { continue }
             var bin = bins[key] ?? ([], 0)
             bin.heights.append(sample.position.y - origin.y)
             bin.weight += sample.weight
@@ -402,7 +424,8 @@ final class GreenMapAccumulator: @unchecked Sendable {
             let centreZ = (Float(key.y) + 0.5) * size
             let range = simd_length(SIMD3<Float>(cameraLocal.x - centreX, cameraLocal.y - height, cameraLocal.z - centreZ))
 
-            var cell = cells[key] ?? Cell(entries: [], count: 0, minRange: .greatestFiniteMagnitude)
+            let inside = isInside(key)
+            var cell = (inside ? cells[key] : bandCells[key]) ?? Cell(entries: [], count: 0, minRange: .greatestFiniteMagnitude)
             if cell.count >= Self.minimumObservations,
                abs(height + correction(epoch: epoch, at: SIMD2<Float>(centreX, centreZ)) - correctedMean(cell, key: key)) > 0.08 { continue }
 
@@ -417,7 +440,7 @@ final class GreenMapAccumulator: @unchecked Sendable {
             }
             cell.count += 1
             cell.minRange = min(cell.minRange, range)
-            cells[key] = cell
+            if inside { cells[key] = cell } else { bandCells[key] = cell }
         }
         dirty = true
     }
@@ -626,6 +649,17 @@ final class GreenMapAccumulator: @unchecked Sendable {
         return zip(raw, heights).map {
             MapCell(ix: $0.ix, iz: $0.iz, height: $1, observations: $0.observations, bestRange: $0.bestRange, noise: $0.noise)
         }
+    }
+
+    /// Drift-corrected cells in the strip just outside the outline (not smoothed).
+    func exportBandCells() -> [MapCell] {
+        lock.lock(); defer { lock.unlock() }
+        refreshIfNeeded()
+        return bandCells.compactMap { key, cell in
+            guard cell.count >= Self.minimumObservations else { return nil }
+            return MapCell(ix: Int(key.x), iz: Int(key.y), height: correctedMean(cell, key: key),
+                           observations: cell.count, bestRange: cell.minRange, noise: noise(of: cell))
+        }.sorted { ($0.iz, $0.ix) < ($1.iz, $1.ix) }
     }
 }
 
