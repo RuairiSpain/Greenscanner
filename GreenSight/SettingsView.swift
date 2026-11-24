@@ -18,6 +18,11 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                Section("Units") {
+                    Picker("Units", selection: $model.units) {
+                        ForEach(UnitSystem.allCases) { Text($0.label).tag($0) }
+                    }
+                }
                 Section("Capture") {
                     Toggle("Automatic ball and cup suggestion", isOn: $model.autoDetection)
                     Toggle("Diagnostic overlay", isOn: $model.showDiagnostics)
@@ -37,7 +42,7 @@ struct SettingsView: View {
                     Text("Camera and depth frames are processed on-device. Saved reads contain reconstructed surface cells and calculated paths—not photos or video.")
                 }
                 Section("About") {
-                    LabeledContent("Version", value: "1.1 (2)")
+                    LabeledContent("Version", value: "1.2 (3)")
                     LabeledContent("Grid", value: "30 mm")
                     LabeledContent("Physics", value: "Rolling sphere + Stimp drag")
                 }

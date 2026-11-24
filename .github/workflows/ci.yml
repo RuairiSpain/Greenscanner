@@ -1,0 +1,17 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  build-and-test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate project files
+        run: python3 -I Scripts/validate_project.py && python3 -I Scripts/reference_validation.py
+      - name: Build and test
+        run: |
+          xcodebuild test -project GreenSight.xcodeproj -scheme GreenSight \
+            -destination 'platform=iOS Simulator,name=iPhone 15' \
+            CODE_SIGNING_ALLOWED=NO | tail -n 60

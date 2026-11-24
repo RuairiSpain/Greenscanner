@@ -95,6 +95,7 @@ final class HeightMapAccumulator: @unchecked Sendable {
         }
 
         guard !output.isEmpty else { return .empty }
+        output = Self.smoothed(output)
         let xValues = output.map(\.x)
         let yValues = output.map(\.y)
         let expected = max(1, Int((puttLength + 0.8) * (corridorHalfWidth * 2) / (cellSize * cellSize)))
@@ -108,6 +109,29 @@ final class HeightMapAccumulator: @unchecked Sendable {
             maxY: yValues.max() ?? 0,
             coverage: coverage
         )
+    }
+
+    /// Light 3x3 binomial smoothing. Greens are smooth at this scale, so this suppresses
+    /// per-cell depth noise that would otherwise be amplified when gradients are differentiated.
+    static func smoothed(_ cells: [HeightCell]) -> [HeightCell] {
+        var byKey: [SIMD2<Int32>: HeightCell] = [:]
+        byKey.reserveCapacity(cells.count)
+        for cell in cells { byKey[SIMD2<Int32>(Int32(cell.x), Int32(cell.y))] = cell }
+        return cells.map { cell in
+            var weighted: Float = 0
+            var total: Float = 0
+            for dx in -1...1 {
+                for dy in -1...1 {
+                    let key = SIMD2<Int32>(Int32(cell.x + dx), Int32(cell.y + dy))
+                    guard let neighbour = byKey[key] else { continue }
+                    let weight: Float = (dx == 0 && dy == 0) ? 4 : ((dx == 0 || dy == 0) ? 2 : 1)
+                    weighted += neighbour.height * weight
+                    total += weight
+                }
+            }
+            return HeightCell(x: cell.x, y: cell.y, height: weighted / total,
+                              variance: cell.variance, observations: cell.observations)
+        }
     }
 
     func currentBasis(scanID: UUID? = nil) -> GreenBasis? {

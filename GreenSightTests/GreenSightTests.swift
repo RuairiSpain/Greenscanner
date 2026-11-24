@@ -79,6 +79,77 @@ final class GreenSightTests: XCTestCase {
         XCTAssertEqual(accumulator.snapshot(scanID: currentID).cells.count, 8)
     }
 
+    func testSmoothingPreservesPlanarSurface() {
+        var cells: [HeightCell] = []
+        for x in -5...5 {
+            for y in -5...5 {
+                cells.append(HeightCell(x: x, y: y, height: Float(x) * 0.0006, variance: 0, observations: 5))
+            }
+        }
+        let smoothed = HeightMapAccumulator.smoothed(cells)
+        let interior = smoothed.first { $0.x == 0 && $0.y == 0 }
+        XCTAssertEqual(interior?.height ?? 1, 0, accuracy: 1e-6)
+        let neighbour = smoothed.first { $0.x == 2 && $0.y == 1 }
+        XCTAssertEqual(neighbour?.height ?? 1, 0.0012, accuracy: 1e-6)
+    }
+
+    func testSmoothingReducesIsolatedSpike() {
+        var cells: [HeightCell] = []
+        for x in -3...3 {
+            for y in -3...3 {
+                cells.append(HeightCell(x: x, y: y, height: (x == 0 && y == 0) ? 0.01 : 0, variance: 0, observations: 5))
+            }
+        }
+        let centre = HeightMapAccumulator.smoothed(cells).first { $0.x == 0 && $0.y == 0 }
+        XCTAssertLessThan(centre?.height ?? 1, 0.0051)
+    }
+
+    func testCameraPointBackProjection() {
+        let centre = DepthProjector.cameraPoint(u: 50, v: 40, depth: 2, fx: 100, fy: 100, cx: 50, cy: 40)
+        XCTAssertEqual(centre.x, 0, accuracy: 1e-6)
+        XCTAssertEqual(centre.y, 0, accuracy: 1e-6)
+        XCTAssertEqual(centre.z, -2, accuracy: 1e-6)
+        // Pixels below the principal point are below the optical axis (negative camera y).
+        let below = DepthProjector.cameraPoint(u: 50, v: 90, depth: 2, fx: 100, fy: 100, cx: 50, cy: 40)
+        XCTAssertLessThan(below.y, 0)
+    }
+
+    func testFarDepthIsDownWeighted() {
+        XCTAssertEqual(DepthProjector.rangeWeight(depth: 1.0), 1, accuracy: 1e-6)
+        XCTAssertLessThan(DepthProjector.rangeWeight(depth: 3.0), 0.3)
+    }
+
+    func testCaptureSpeedFallsWithOffset() {
+        XCTAssertGreaterThan(PuttingPhysics.captureSpeed(offset: 0), PuttingPhysics.captureSpeed(offset: 1))
+    }
+
+    func testFlatPuttReportsHoleProbability() throws {
+        let snapshot = fixtureSurface { _, _ in 0 }
+        let physics = PuttingPhysics(surface: GreenSurface(snapshot: snapshot),
+                                     cup: SIMD2<Double>(0, 2.0), stimpFeet: 10)
+        let solution = TrajectoryOptimizer(physics: physics).solve()
+        let chance = try XCTUnwrap(solution.holeProbability)
+        XCTAssertGreaterThanOrEqual(chance, 0)
+        XCTAssertLessThanOrEqual(chance, 1)
+    }
+
+    func testUnitFormatting() {
+        XCTAssertEqual(UnitSystem.metric.distance(3.2), "3.2 m")
+        XCTAssertEqual(UnitSystem.imperial.shortLength(0.0254), "1 in")
+    }
+
+    func testCSVHasHeaderAndOneRowPerCell() {
+        let snapshot = fixtureSurface { _, _ in 0 }
+        let solution = PuttSolution(launchAngleDegrees: 0, launchSpeedMetresPerSecond: 1, aimOffsetCentimetres: 0,
+                                    arrivalSpeedMetresPerSecond: 0.5, closestDistanceMetres: 0, holed: true,
+                                    confidence: 1, path: [])
+        let record = ScanRecord(id: UUID(), createdAt: Date(), distanceMetres: 2, stimpFeet: 10,
+                                coverage: 1, solution: solution, surface: snapshot)
+        let lines = CSVExporter.surfaceCSV(for: record).split(separator: "\n")
+        XCTAssertEqual(lines.first, "x_m,y_m,height_m,variance_m2,observations")
+        XCTAssertEqual(lines.count, snapshot.cells.count + 1)
+    }
+
     private func fixtureSurface(height: (Double, Double) -> Float) -> HeightMapSnapshot {
         let size: Float = 0.03
         var cells: [HeightCell] = []

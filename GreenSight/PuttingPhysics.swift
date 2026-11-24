@@ -23,6 +23,12 @@ struct PuttingPhysics: Sendable {
         return releaseSpeed * releaseSpeed / (2 * feetToMetres(stimpFeet))
     }
 
+    /// Fastest speed at which the ball still drops. Centre entries tolerate about 1.5 m/s;
+    /// the limit falls toward 0.6 m/s at the rim, where the ball is more likely to lip out.
+    static func captureSpeed(offset: Double) -> Double {
+        1.5 - 0.9 * offset.clamped(to: 0...1)
+    }
+
     func simulate(angle: Double, speed: Double, retainPath: Bool) -> Simulation {
         let direction = SIMD2<Double>(sin(angle), cos(angle))
         var position = SIMD2<Double>.zero
@@ -54,7 +60,7 @@ struct PuttingPhysics: Sendable {
                 closest = distance
                 closestSpeed = velocity.length
             }
-            if distance <= cupRadius, velocity.length <= 1.4 {
+            if distance <= cupRadius, velocity.length <= Self.captureSpeed(offset: distance / cupRadius) {
                 holed = true
                 closest = distance
                 closestSpeed = velocity.length
@@ -73,6 +79,24 @@ struct PuttingPhysics: Sendable {
 
 struct TrajectoryOptimizer: Sendable {
     let physics: PuttingPhysics
+
+    private func holeProbability(angle: Double, speed: Double) -> Double {
+        var holed = 0
+        var total = 0
+        for stimpDelta in [-1.0, 0.0, 1.0] {
+            let varied = PuttingPhysics(surface: physics.surface, cup: physics.cup,
+                                        stimpFeet: max(5, physics.stimpFeet + stimpDelta))
+            for angleDelta in [-0.6, 0.0, 0.6] {
+                for speedScale in [0.96, 1.0, 1.04] {
+                    let result = varied.simulate(angle: angle + angleDelta * .pi / 180,
+                                                 speed: speed * speedScale, retainPath: false)
+                    total += 1
+                    if result.holed { holed += 1 }
+                }
+            }
+        }
+        return Double(holed) / Double(max(total, 1))
+    }
 
     func solve() -> PuttSolution {
         struct Candidate {
@@ -129,7 +153,8 @@ struct TrajectoryOptimizer: Sendable {
             closestDistanceMetres: final.minimumDistance,
             holed: final.holed,
             confidence: confidence,
-            path: final.path
+            path: final.path,
+            holeProbability: holeProbability(angle: selected.angle, speed: selected.speed)
         )
     }
 }

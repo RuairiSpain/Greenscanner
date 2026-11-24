@@ -10,7 +10,7 @@ def basis_round_trip() -> None:
     dx, dz = cup[0] - ball[0], cup[2] - ball[2]
     n = math.hypot(dx, dz)
     forward = (dx / n, dz / n)
-    right = (forward[1], -forward[0])
+    right = (-forward[1], forward[0])
     x, along = 0.4, 1.7
     world = (ball[0] + right[0] * x + forward[0] * along,
              ball[2] + right[1] * x + forward[1] * along)

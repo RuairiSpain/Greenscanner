@@ -17,6 +17,11 @@ final class AppModel: NSObject, ObservableObject, ARSessionDelegate {
     @Published var solution: PuttSolution?
     @Published var records: [ScanRecord]
     @Published var exportURL: URL?
+    @Published var csvURL: URL?
+    @Published var trackingLostDuringScan = false
+    @Published var units: UnitSystem {
+        didSet { UserDefaults.standard.set(units.rawValue, forKey: "greensight.units") }
+    }
 
     private weak var arView: ARView?
     private var renderer: ARRenderer?
@@ -35,9 +40,14 @@ final class AppModel: NSObject, ObservableObject, ARSessionDelegate {
     private var lastSurfacePublishTimestamp: TimeInterval = 0
     private var pendingCandidatePoint: CGPoint?
     private var pendingCandidateCount = 0
+    private var scenePhaseActive = true
+    private var screenVisible = true
+    private var sessionPausedByUs = false
+    private var isDemo = false
 
     override init() {
         records = []
+        units = UnitSystem(rawValue: UserDefaults.standard.string(forKey: "greensight.units") ?? "") ?? .metric
         super.init()
 
         let store = self.store
@@ -81,6 +91,10 @@ final class AppModel: NSObject, ObservableObject, ARSessionDelegate {
         surface = .empty
         coverage = 0
         exportURL = nil
+        csvURL = nil
+        trackingLostDuringScan = false
+        sessionPausedByUs = false
+        isDemo = false
 
         guard ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) else {
             renderer?.clear()
@@ -96,13 +110,35 @@ final class AppModel: NSObject, ObservableObject, ARSessionDelegate {
 
     @MainActor
     func setSessionActive(_ active: Bool) {
-        guard let view = arView else { return }
-        if !active {
-            view.session.pause()
+        scenePhaseActive = active
+        updateSessionRunState()
+    }
+
+    /// Called when the Read tab appears or disappears so the camera and LiDAR stop while other tabs are shown.
+    @MainActor
+    func setScreenVisible(_ visible: Bool) {
+        screenVisible = visible
+        updateSessionRunState()
+    }
+
+    @MainActor
+    private func updateSessionRunState() {
+        guard let view = arView, !isDemo else { return }
+        if !(scenePhaseActive && screenVisible) {
+            guard !sessionPausedByUs else { return }
+            switch phase {
+            case .markBall, .markCup, .scanning, .result:
+                view.session.pause()
+                sessionPausedByUs = true
+            default: break
+            }
             return
         }
-        guard phase == .markBall || phase == .markCup || phase == .scanning || phase == .result else { return }
+        guard sessionPausedByUs else { return }
+        sessionPausedByUs = false
         view.session.run(makeConfiguration())
+        // World tracking may not resume with the same origin, so a scan spanning a pause is suspect.
+        if phase == .scanning { trackingLostDuringScan = true }
     }
 
     private func makeConfiguration() -> ARWorldTrackingConfiguration {
@@ -141,10 +177,12 @@ final class AppModel: NSObject, ObservableObject, ARSessionDelegate {
                 return
             }
             lastSurfacePublishTimestamp = 0
+            trackingLostDuringScan = false
             phase = .scanning
         default:
             return
         }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         renderer?.showLandmarks(ball: ballPosition, cup: cupPosition)
     }
 
@@ -242,6 +280,7 @@ final class AppModel: NSObject, ObservableObject, ARSessionDelegate {
                     self.coverage = snapshot.coverage
                     self.solution = result
                     self.phase = .result
+                    UINotificationFeedbackGenerator().notificationOccurred(result.holed ? .success : .warning)
                     if let basis = accumulator.currentBasis(scanID: currentScanID) {
                         self.renderer?.showTrajectory(result, surface: green, basis: basis)
                     }
@@ -261,6 +300,9 @@ final class AppModel: NSObject, ObservableObject, ARSessionDelegate {
         scanID = UUID()
         depthInFlightScanID = nil
         arView?.session.pause()
+        sessionPausedByUs = false
+        isDemo = true
+        trackingLostDuringScan = false
         renderer?.clear()
         phase = .processing
         trackingText = "Building demo surface"
@@ -291,6 +333,14 @@ final class AppModel: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     @MainActor
+    func setLabel(_ label: String, for id: UUID) {
+        guard let index = records.firstIndex(where: { $0.id == id }) else { return }
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        records[index].label = trimmed.isEmpty ? nil : trimmed
+        persist(records: records)
+    }
+
+    @MainActor
     func deleteRecords(at offsets: IndexSet) {
         records.remove(atOffsets: offsets)
         persist(records: records)
@@ -301,10 +351,12 @@ final class AppModel: NSObject, ObservableObject, ARSessionDelegate {
         persistenceQueue.async { [weak self] in
             store.save(records)
             let url = record.flatMap { try? store.export($0) }
+            let csv = record.flatMap { try? store.exportCSV($0) }
             guard let record, let url else { return }
             DispatchQueue.main.async {
                 guard let self, self.records.first?.id == record.id else { return }
                 self.exportURL = url
+                self.csvURL = csv
             }
         }
     }
@@ -313,9 +365,11 @@ final class AppModel: NSObject, ObservableObject, ARSessionDelegate {
         let store = self.store
         persistenceQueue.async { [weak self] in
             let url = try? store.export(record)
+            let csv = try? store.exportCSV(record)
             DispatchQueue.main.async {
                 guard let self, self.analysisID == analysisID else { return }
                 self.exportURL = url
+                self.csvURL = csv
             }
         }
     }
@@ -329,6 +383,12 @@ final class AppModel: NSObject, ObservableObject, ARSessionDelegate {
         @unknown default: text = "Tracking changed"
         }
         trackingText = text
+        if phase == .scanning {
+            switch camera.trackingState {
+            case .normal: break
+            default: trackingLostDuringScan = true
+            }
+        }
     }
 
     func session(_ session: ARSession, didFailWithError error: Error) {

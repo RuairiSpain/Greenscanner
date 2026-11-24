@@ -3,6 +3,19 @@ import CoreVideo
 import simd
 
 struct DepthProjector {
+    /// LiDAR noise grows with range, so far samples are rejected and mid-range samples are down-weighted.
+    static let maximumDepth: Float = 3.5
+
+    /// Back-projects a depth pixel into ARKit camera space (x right, y up, camera looks along -z).
+    static func cameraPoint(u: Float, v: Float, depth: Float, fx: Float, fy: Float, cx: Float, cy: Float) -> SIMD3<Float> {
+        SIMD3<Float>((u - cx) * depth / fx, (cy - v) * depth / fy, -depth)
+    }
+
+    static func rangeWeight(depth: Float) -> Float {
+        let ratio = 1.5 / max(depth, 0.25)
+        return min(1, ratio * ratio)
+    }
+
     static func project(frame: ARFrame, stride: Int = 2) -> [WorldSample] {
         guard let depthData = frame.sceneDepth else { return [] }
         let depthMap = depthData.depthMap
@@ -49,21 +62,16 @@ struct DepthProjector {
             let confidenceRow = confidenceBase?.advanced(by: v * confidenceBytesPerRow).assumingMemoryBound(to: UInt8.self)
             for u in Swift.stride(from: 0, to: width, by: sampleStride) {
                 let depth = depthRow[u]
-                guard depth.isFinite, depth >= 0.25, depth <= 4.5 else { continue }
+                guard depth.isFinite, depth >= 0.25, depth <= maximumDepth else { continue }
                 let confidence = confidenceRow.map { Int($0[u]) } ?? 1
                 guard confidence >= ARConfidenceLevel.medium.rawValue else { continue }
 
                 // ARCamera uses a right-handed camera space looking along negative Z.
-                let cameraPoint = SIMD4<Float>(
-                    (Float(u) - cx) * depth / fx,
-                    (cy - Float(v)) * depth / fy,
-                    -depth,
-                    1
-                )
-                let world = cameraToWorld * cameraPoint
+                let point = cameraPoint(u: Float(u), v: Float(v), depth: depth, fx: fx, fy: fy, cx: cx, cy: cy)
+                let world = cameraToWorld * SIMD4<Float>(point.x, point.y, point.z, 1)
                 output.append(WorldSample(
                     position: SIMD3<Float>(world.x, world.y, world.z),
-                    weight: confidence == ARConfidenceLevel.high.rawValue ? 2 : 1
+                    weight: (confidence == ARConfidenceLevel.high.rawValue ? 2 : 1) * rangeWeight(depth: depth)
                 ))
             }
         }

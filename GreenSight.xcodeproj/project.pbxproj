@@ -100,6 +100,12 @@
 		39D256F53428C2CD382E3BFF = {
 			isa = PBXBuildFile; fileRef = E74A6F5B73F997D51A7D0BA5 /* SettingsView.swift */;
 		};
+		93E3DB97F6C2EEFC29048F96 = {
+			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Units.swift"; sourceTree = "<group>";
+		};
+		22798155FBE9587299D5AA43 = {
+			isa = PBXBuildFile; fileRef = 93E3DB97F6C2EEFC29048F96 /* Units.swift */;
+		};
 		9344A96E1BF63DE26EB8FE9D = {
 			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GreenSightTests.swift"; sourceTree = "<group>";
 		};
@@ -140,6 +146,7 @@
 				880361C93D723785F8667F06 /* PuttingPhysics.swift */,
 				920A8ED967C32D6DE2D0D6A6 /* ScanStore.swift */,
 				E74A6F5B73F997D51A7D0BA5 /* SettingsView.swift */,
+				93E3DB97F6C2EEFC29048F96 /* Units.swift */,
 				8119A4784A182D847E337D77 /* Assets.xcassets */,
 				13A03CFFEE26A9B9A367DAD9 /* Info.plist */,
 			);
@@ -176,6 +183,7 @@
 				94E00E57988E5613B0F386AB /* PuttingPhysics.swift in Sources */,
 				0373C7D2B92B86B0C47AD44E /* ScanStore.swift in Sources */,
 				39D256F53428C2CD382E3BFF /* SettingsView.swift in Sources */,
+				22798155FBE9587299D5AA43 /* Units.swift in Sources */,
 			); runOnlyForDeploymentPostprocessing = 0;
 		};
 		29BEEA3D856852A8CC3247ED = {
@@ -247,11 +255,11 @@
 				ASSETCATALOG_COMPILER_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = GreenSight/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.1;
+				MARKETING_VERSION = 1.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.GreenSight;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -269,11 +277,11 @@
 				ASSETCATALOG_COMPILER_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = GreenSight/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.1;
+				MARKETING_VERSION = 1.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.GreenSight;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;

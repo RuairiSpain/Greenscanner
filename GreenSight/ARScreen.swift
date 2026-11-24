@@ -10,6 +10,7 @@ struct ARScreen: View {
         ZStack {
             ARViewContainer(model: model)
                 .ignoresSafeArea(edges: .top)
+                .accessibilityLabel("Camera view of the green")
             LinearGradient(colors: [.black.opacity(0.5), .clear, .black.opacity(0.7)],
                            startPoint: .top, endPoint: .bottom)
                 .allowsHitTesting(false)
@@ -40,6 +41,8 @@ struct ARScreen: View {
         .onChange(of: scenePhase) { _, newPhase in
             model.setSessionActive(newPhase == .active)
         }
+        .onAppear { model.setScreenVisible(true) }
+        .onDisappear { model.setScreenVisible(false) }
     }
 
     private var statusHeader: some View {
@@ -62,6 +65,7 @@ struct ARScreen: View {
         }
         .padding(12)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .accessibilityElement(children: .combine)
     }
 
     @ViewBuilder
@@ -85,6 +89,12 @@ struct ARScreen: View {
             case .scanning:
                 ProgressView(value: model.coverage)
                     .tint(.mint)
+                    .accessibilityLabel("Scan coverage")
+                if model.trackingLostDuringScan {
+                    Label("Tracking was lost during this scan. Restart if the line looks off.", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
                 HStack {
                     Button("Restart", role: .destructive) { model.startNewScan() }
                         .buttonStyle(.bordered)
@@ -109,7 +119,12 @@ struct ARScreen: View {
                     Button { showHeatMapSheet = true } label: { Label("Slope map", systemImage: "map.fill") }
                         .buttonStyle(.bordered)
                     if let url = model.exportURL {
-                        ShareLink(item: url) { Label("Export", systemImage: "square.and.arrow.up") }
+                        Menu {
+                            ShareLink(item: url) { Label("JSON (full read)", systemImage: "curlybraces") }
+                            if let csv = model.csvURL {
+                                ShareLink(item: csv) { Label("CSV (surface cells)", systemImage: "tablecells") }
+                            }
+                        } label: { Label("Export", systemImage: "square.and.arrow.up") }
                             .buttonStyle(.bordered)
                     }
                     Spacer()
@@ -130,11 +145,14 @@ struct ARScreen: View {
         if let result = model.solution {
             HStack(spacing: 18) {
                 metric(title: "Aim", value: aimText(result))
-                metric(title: "Start speed", value: String(format: "%.2f m/s", result.launchSpeedMetresPerSecond))
+                metric(title: "Start speed", value: model.units.speed(result.launchSpeedMetresPerSecond))
                 metric(title: "Confidence", value: result.confidence.formatted(.percent.precision(.fractionLength(0))))
+                if let chance = result.holeProbability {
+                    metric(title: "Holes out", value: chance.formatted(.percent.precision(.fractionLength(0))))
+                }
             }
             if !result.holed {
-                Label("Best measured line misses the cup by \(Int(result.closestDistanceMetres * 100)) cm. Rescan for more coverage.", systemImage: "exclamationmark.triangle.fill")
+                Label("Best measured line misses the cup by \(model.units.shortLength(result.closestDistanceMetres)). Rescan for more coverage.", systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
@@ -163,9 +181,9 @@ struct ARScreen: View {
     }
 
     private func aimText(_ result: PuttSolution) -> String {
-        let amount = abs(result.aimOffsetCentimetres)
-        if amount < 1 { return "Straight" }
-        return String(format: "%.0f cm %@", amount, result.aimOffsetCentimetres > 0 ? "right" : "left")
+        let metres = abs(result.aimOffsetCentimetres) / 100
+        if metres < 0.01 { return "Straight" }
+        return "\(model.units.shortLength(metres)) \(result.aimOffsetCentimetres > 0 ? "right" : "left")"
     }
 
     private func primaryButton(_ title: String, icon: String, action: @escaping () -> Void) -> some View {

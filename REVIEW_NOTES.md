@@ -42,3 +42,13 @@
 ## Validation still required on macOS and hardware
 
 This Linux environment does not include Xcode, the Swift compiler or Apple SDKs. Before treating this build as complete, run the XCTest suite and a Release build in current Xcode, then profile on a LiDAR-equipped iPhone using Instruments. Validate depth accuracy on a surveyed level surface before relying on putting guidance.
+
+## v1.2 changes (not compiled; see validation note below)
+
+- Depth: samples beyond 3.5 m rejected, mid/far samples down-weighted by range; 3x3 smoothing of the height map.
+- Physics: distance-dependent cup capture speed; optimiser seeded from the Stimp-derived deceleration; hole probability from 27 perturbed runs (Stimp +/-1, aim +/-0.6 deg, speed +/-4%).
+- AR: shared materials, merged path segments, pace-coloured line, break-apex marker, haptics, session paused while the Read tab is hidden, tracking-loss warning during scans.
+- App: metric/imperial units, CSV export, course/hole label on saved reads.
+- CI workflow (macOS build and test). Tests added for smoothing, back-projection, range weighting, probability, units and CSV.
+
+Not done: measured-accuracy validation (needs LiDAR hardware and a surveyed surface), a Core ML ball/cup detector, draggable markers, splitting AppModel into smaller types, localisation, and a real bundle identifier. The cup-capture constants and probability perturbation sizes are engineering estimates, not measured values.

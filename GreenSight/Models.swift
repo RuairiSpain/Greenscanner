@@ -71,6 +71,8 @@ struct PuttSolution: Codable, Sendable {
     let holed: Bool
     let confidence: Double
     let path: [TrajectoryPoint]
+    /// Share of perturbed runs (Stimp +/-1, aim +/-0.6 deg, speed +/-4%) that hole out. Nil in older saved reads.
+    var holeProbability: Double? = nil
 }
 
 struct ScanRecord: Identifiable, Codable, Sendable {
@@ -81,6 +83,8 @@ struct ScanRecord: Identifiable, Codable, Sendable {
     let coverage: Double
     let solution: PuttSolution
     let surface: HeightMapSnapshot
+    /// Optional course/hole name entered by the user.
+    var label: String? = nil
 }
 
 enum ScanPhase: Equatable {

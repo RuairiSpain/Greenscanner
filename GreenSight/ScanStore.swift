@@ -30,6 +30,14 @@ final class ScanStore: @unchecked Sendable {
         try JSONEncoder.pretty.encode(record).write(to: url, options: .atomic)
         return url
     }
+
+    func exportCSV(_ record: ScanRecord) throws -> URL {
+        let formatter = ISO8601DateFormatter()
+        let safeDate = formatter.string(from: record.createdAt).replacingOccurrences(of: ":", with: "-")
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("GreenSight-surface-\(safeDate).csv")
+        try CSVExporter.surfaceCSV(for: record).write(to: url, atomically: true, encoding: .utf8)
+        return url
+    }
 }
 
 private extension JSONEncoder {
