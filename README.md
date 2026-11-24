@@ -135,3 +135,7 @@ Use during a round may be restricted by the Rules of Golf, a Model Local Rule or
 ## License
 
 MIT. See `LICENSE`.
+
+## Map a Green mode (v1.3, work in progress)
+
+A separate tab for scanning a whole green so its slopes can be shared later. Flow: choose course and hole, mark the green edge (tap, "Add point", or auto-drop every 2 m), close the shape, then walk the inside while the AR overlay and minimap show scanned (green) and too-far (amber) areas. Reads are saved locally per green and can be exported or imported as `.greensight.json` files. Upload and merging of several users' scans are not implemented yet.

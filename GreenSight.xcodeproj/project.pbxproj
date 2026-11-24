@@ -40,6 +40,30 @@
 		8C62EFA5DD20EE7A83D93AE2 = {
 			isa = PBXBuildFile; fileRef = 0D90F084DABA3FEE012CD708 /* DepthProjector.swift */;
 		};
+		E6E9E88FF6C0F09B238730B2 = {
+			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GreenGeometry.swift"; sourceTree = "<group>";
+		};
+		13EE8CB48F0A087D6DA1ACE2 = {
+			isa = PBXBuildFile; fileRef = E6E9E88FF6C0F09B238730B2 /* GreenGeometry.swift */;
+		};
+		539349829DF90F6733A21D59 = {
+			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GreenMapAccumulator.swift"; sourceTree = "<group>";
+		};
+		EE07D10B3178DFFF251266B0 = {
+			isa = PBXBuildFile; fileRef = 539349829DF90F6733A21D59 /* GreenMapAccumulator.swift */;
+		};
+		646F34D0F50E8A81D212AFA1 = {
+			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GreenMapModels.swift"; sourceTree = "<group>";
+		};
+		558B07680DBCB8EAADF344B2 = {
+			isa = PBXBuildFile; fileRef = 646F34D0F50E8A81D212AFA1 /* GreenMapModels.swift */;
+		};
+		55DF34BCEB060EBB9ACFDED4 = {
+			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GreenMapStore.swift"; sourceTree = "<group>";
+		};
+		61DC4F8BCBD865EE1F2A53AA = {
+			isa = PBXBuildFile; fileRef = 55DF34BCEB060EBB9ACFDED4 /* GreenMapStore.swift */;
+		};
 		77A6495A83A5496584231556 = {
 			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GreenSightApp.swift"; sourceTree = "<group>";
 		};
@@ -69,6 +93,24 @@
 		};
 		871229127947367EE20A2F43 = {
 			isa = PBXBuildFile; fileRef = 41A65D1C74056BEE1890734D /* LandmarkDetector.swift */;
+		};
+		7C2FE949B6A04CCC4F089064 = {
+			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MapModel.swift"; sourceTree = "<group>";
+		};
+		599820405D8B95C4DDC02724 = {
+			isa = PBXBuildFile; fileRef = 7C2FE949B6A04CCC4F089064 /* MapModel.swift */;
+		};
+		7FD75B22EF843E4F3FD8CA74 = {
+			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MapRenderer.swift"; sourceTree = "<group>";
+		};
+		9D36B3D4FEBEB3E61DE8DE75 = {
+			isa = PBXBuildFile; fileRef = 7FD75B22EF843E4F3FD8CA74 /* MapRenderer.swift */;
+		};
+		FBA966D56EA588B0CD024DF1 = {
+			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MapViews.swift"; sourceTree = "<group>";
+		};
+		3B23B9BBE398F2F10CA6B11D = {
+			isa = PBXBuildFile; fileRef = FBA966D56EA588B0CD024DF1 /* MapViews.swift */;
 		};
 		C1FEFD561274700B40017B10 = {
 			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Math.swift"; sourceTree = "<group>";
@@ -136,11 +178,18 @@
 				EDF27BD80B9353A84C5E7023 /* ContentView.swift */,
 				052FEDCDD6152B61E1D45BC4 /* DemoFactory.swift */,
 				0D90F084DABA3FEE012CD708 /* DepthProjector.swift */,
+				E6E9E88FF6C0F09B238730B2 /* GreenGeometry.swift */,
+				539349829DF90F6733A21D59 /* GreenMapAccumulator.swift */,
+				646F34D0F50E8A81D212AFA1 /* GreenMapModels.swift */,
+				55DF34BCEB060EBB9ACFDED4 /* GreenMapStore.swift */,
 				77A6495A83A5496584231556 /* GreenSightApp.swift */,
 				329EDA1D083BC18999101C68 /* HeatMapView.swift */,
 				D38401287CC72B2C2FF98118 /* HeightMap.swift */,
 				BCFE8A313C1CFA8D7C3A8D20 /* HistoryView.swift */,
 				41A65D1C74056BEE1890734D /* LandmarkDetector.swift */,
+				7C2FE949B6A04CCC4F089064 /* MapModel.swift */,
+				7FD75B22EF843E4F3FD8CA74 /* MapRenderer.swift */,
+				FBA966D56EA588B0CD024DF1 /* MapViews.swift */,
 				C1FEFD561274700B40017B10 /* Math.swift */,
 				0E00200D2A63DA5C22BB9E4D /* Models.swift */,
 				880361C93D723785F8667F06 /* PuttingPhysics.swift */,
@@ -173,11 +222,18 @@
 				3515404FF8FDBB221A5E7E05 /* ContentView.swift in Sources */,
 				C91C65FA76EC58B06B1A225C /* DemoFactory.swift in Sources */,
 				8C62EFA5DD20EE7A83D93AE2 /* DepthProjector.swift in Sources */,
+				13EE8CB48F0A087D6DA1ACE2 /* GreenGeometry.swift in Sources */,
+				EE07D10B3178DFFF251266B0 /* GreenMapAccumulator.swift in Sources */,
+				558B07680DBCB8EAADF344B2 /* GreenMapModels.swift in Sources */,
+				61DC4F8BCBD865EE1F2A53AA /* GreenMapStore.swift in Sources */,
 				A86393D90B50C3A4D45348D6 /* GreenSightApp.swift in Sources */,
 				8F23CAEA24BEB0782BEE03C8 /* HeatMapView.swift in Sources */,
 				83E456D388675F9043721EBF /* HeightMap.swift in Sources */,
 				E4E7EE32103D597FF12C8A71 /* HistoryView.swift in Sources */,
 				871229127947367EE20A2F43 /* LandmarkDetector.swift in Sources */,
+				599820405D8B95C4DDC02724 /* MapModel.swift in Sources */,
+				9D36B3D4FEBEB3E61DE8DE75 /* MapRenderer.swift in Sources */,
+				3B23B9BBE398F2F10CA6B11D /* MapViews.swift in Sources */,
 				56A3420A394F04294B245AE1 /* Math.swift in Sources */,
 				8C178E85489732C6EB0294EC /* Models.swift in Sources */,
 				94E00E57988E5613B0F386AB /* PuttingPhysics.swift in Sources */,
@@ -255,11 +311,11 @@
 				ASSETCATALOG_COMPILER_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 4;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = GreenSight/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.2;
+				MARKETING_VERSION = 1.3;
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.GreenSight;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -277,11 +333,11 @@
 				ASSETCATALOG_COMPILER_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 4;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = GreenSight/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.2;
+				MARKETING_VERSION = 1.3;
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.GreenSight;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;

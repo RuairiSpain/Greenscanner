@@ -5,6 +5,8 @@ struct ContentView: View {
         TabView {
             ARScreen()
                 .tabItem { Label("Read", systemImage: "viewfinder") }
+            MapHomeView()
+                .tabItem { Label("Map", systemImage: "map") }
             HistoryView()
                 .tabItem { Label("History", systemImage: "clock.arrow.circlepath") }
             SettingsView()

@@ -150,6 +150,115 @@ final class GreenSightTests: XCTestCase {
         XCTAssertEqual(lines.count, snapshot.cells.count + 1)
     }
 
+    // MARK: Green mapping
+
+    private let square: [SIMD2<Float>] = [SIMD2(0, 0), SIMD2(4, 0), SIMD2(4, 4), SIMD2(0, 4)]
+
+    func testPolygonAreaAndContainment() {
+        XCTAssertEqual(GreenGeometry.area(square), 16, accuracy: 1e-4)
+        XCTAssertTrue(GreenGeometry.contains(square, point: SIMD2(2, 2)))
+        XCTAssertFalse(GreenGeometry.contains(square, point: SIMD2(5, 2)))
+    }
+
+    func testSelfIntersectionDetection() {
+        XCTAssertFalse(GreenGeometry.selfIntersects(square))
+        let bowtie: [SIMD2<Float>] = [SIMD2(0, 0), SIMD2(4, 4), SIMD2(4, 0), SIMD2(0, 4)]
+        XCTAssertTrue(GreenGeometry.selfIntersects(bowtie))
+    }
+
+    private func flatSamples(height: Float = 0) -> [WorldSample] {
+        var samples: [WorldSample] = []
+        var x: Float = 0.01
+        while x < 4 {
+            var z: Float = 0.01
+            while z < 4 {
+                samples.append(WorldSample(position: SIMD3<Float>(x, height, z), weight: 1))
+                z += 0.05
+            }
+            x += 0.05
+        }
+        return samples
+    }
+
+    func testAccumulatorCoversInsideOfOutlineOnly() {
+        let accumulator = GreenMapAccumulator()
+        let id = UUID()
+        accumulator.configure(polygon: square, origin: .zero, scanID: id)
+        // Samples extend 1 m beyond the outline; only the inside may be counted.
+        var samples = flatSamples()
+        samples.append(WorldSample(position: SIMD3<Float>(6, 0, 6), weight: 1))
+        for step in 0..<4 {
+            accumulator.ingest(samples, camera: SIMD3<Float>(2, 1.5, 2), timestamp: Double(step), scanID: id)
+        }
+        let summary = accumulator.summary()
+        XCTAssertEqual(summary.total, 400)
+        XCTAssertGreaterThan(summary.coverage, 0.95)
+        XCTAssertEqual(summary.weak, 0)
+        XCTAssertTrue(accumulator.exportCells().allSatisfy { $0.ix >= 0 && $0.ix < 20 && $0.iz >= 0 && $0.iz < 20 })
+    }
+
+    func testFarObservationsAreWeakAndStaleScanIgnored() {
+        let accumulator = GreenMapAccumulator()
+        let id = UUID()
+        accumulator.configure(polygon: square, origin: .zero, scanID: id)
+        for step in 0..<4 {
+            accumulator.ingest(flatSamples(), camera: SIMD3<Float>(2, 5, 2), timestamp: Double(step), scanID: id)
+            accumulator.ingest(flatSamples(), camera: SIMD3<Float>(2, 1, 2), timestamp: Double(step), scanID: UUID())
+        }
+        let summary = accumulator.summary()
+        XCTAssertEqual(summary.good, 0)
+        XCTAssertGreaterThan(summary.weak, 300)
+    }
+
+    func testRevisitMeasuresDrift() {
+        let accumulator = GreenMapAccumulator()
+        let id = UUID()
+        accumulator.configure(polygon: square, origin: .zero, scanID: id)
+        for step in 0..<4 {
+            accumulator.ingest(flatSamples(), camera: SIMD3<Float>(2, 1.5, 2), timestamp: Double(step), scanID: id)
+        }
+        accumulator.ingest(flatSamples(height: 0.02), camera: SIMD3<Float>(2, 1.5, 2), timestamp: 60, scanID: id)
+        let drift = accumulator.summary().driftMillimetres
+        XCTAssertNotNil(drift)
+        XCTAssertEqual(drift ?? 0, 20, accuracy: 2)
+    }
+
+    func testQualityPenalisesDriftAndTrackingLoss() {
+        let clean = MapQuality.score(coverage: 1, goodShare: 1, driftMillimetres: nil, trackingLosses: 0)
+        let drifty = MapQuality.score(coverage: 1, goodShare: 1, driftMillimetres: 25, trackingLosses: 0)
+        let lossy = MapQuality.score(coverage: 1, goodShare: 1, driftMillimetres: nil, trackingLosses: 4)
+        XCTAssertEqual(clean, 1, accuracy: 1e-9)
+        XCTAssertLessThan(drifty, clean)
+        XCTAssertLessThan(lossy, clean)
+    }
+
+    func testMapSlopeRecoversGrade() {
+        var cells: [MapCell] = []
+        for ix in 0..<10 {
+            for iz in 0..<10 {
+                cells.append(MapCell(ix: ix, iz: iz, height: Float(ix) * 0.2 * 0.03, observations: 5, bestRange: 1))
+            }
+        }
+        let grades = MapSlope.grades(cells: cells, cellSize: 0.2)
+        XCTAssertEqual(grades[5 * 10 + 5], 0.03, accuracy: 0.001)
+    }
+
+    func testGreenRecordRoundTripsThroughJSON() throws {
+        let record = GreenMapRecord(
+            id: UUID(), courseName: "Test Links", holeNumber: 7, createdAt: Date(timeIntervalSince1970: 1_700_000_000),
+            cellSize: 0.2, edge: square.map { EdgePoint(x: $0.x, z: $0.y) },
+            cells: [MapCell(ix: 1, iz: 2, height: 0.05, observations: 4, bestRange: 1.2)],
+            coverage: 0.9, qualityScore: 0.8, driftMillimetres: 4, trackingLossCount: 1,
+            isPartial: false, headingAligned: true, originLatitude: 53.3, originLongitude: -6.2)
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(GreenMapRecord.self, from: encoder.encode(record))
+        XCTAssertEqual(decoded.courseName, "Test Links")
+        XCTAssertEqual(decoded.cells.first?.iz, 2)
+        XCTAssertEqual(decoded.cells.first?.height ?? 0, 0.05, accuracy: 1e-6)
+        XCTAssertEqual(decoded.edge.count, 4)
+    }
+
     private func fixtureSurface(height: (Double, Double) -> Float) -> HeightMapSnapshot {
         let size: Float = 0.03
         var cells: [HeightCell] = []

@@ -13,6 +13,7 @@
     <key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
     <key>LSRequiresIPhoneOS</key><true/>
     <key>NSCameraUsageDescription</key><string>GreenSight uses the camera and LiDAR depth sensor to reconstruct the putting surface and place the calculated line in augmented reality.</string>
+    <key>NSLocationWhenInUseUsageDescription</key><string>GreenSight uses your location to name the course you are mapping and to align the scan to north so scans of the same green can be combined.</string>
     <key>UIApplicationSceneManifest</key>
     <dict><key>UIApplicationSupportsMultipleScenes</key><false/></dict>
     <key>UILaunchScreen</key><dict/>
