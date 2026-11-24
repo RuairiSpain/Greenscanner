@@ -24,6 +24,10 @@ struct MapDraftPayload: Codable, Sendable {
     var depthSource: String
     var accumulator: GreenMapAccumulator.Snapshot?
     var cupWorld: SIMD3<Float>? = nil
+    var pinDate: Date? = nil
+    var texture: GreenTextureAccumulator.Snapshot? = nil
+    var scanStartedAt: Date? = nil
+    var framesProcessed: Int? = nil
 }
 
 /// Persists one in-progress mapping session so a crash, phone call or low battery does not lose it.

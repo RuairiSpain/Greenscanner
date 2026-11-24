@@ -17,12 +17,20 @@ struct DepthProjector {
         max(0.2, abs(rayY))
     }
 
+    /// Full-range YCbCr (as delivered in ARFrame.capturedImage) to RGB in 0...1.
+    static func rgb(y: UInt8, cb: UInt8, cr: UInt8) -> SIMD3<Float> {
+        let yf = Float(y), cbf = Float(cb) - 128, crf = Float(cr) - 128
+        return SIMD3<Float>((yf + 1.402 * crf) / 255,
+                            (yf - 0.344136 * cbf - 0.714136 * crf) / 255,
+                            (yf + 1.772 * cbf) / 255).clamped01
+    }
+
     static func rangeWeight(depth: Float) -> Float {
         let ratio = 1.5 / max(depth, 0.25)
         return min(1, ratio * ratio)
     }
 
-    static func project(frame: ARFrame, stride: Int = 2, smoothed: Bool = false) -> [WorldSample] {
+    static func project(frame: ARFrame, stride: Int = 2, smoothed: Bool = false, withColour: Bool = false) -> [WorldSample] {
         guard let depthData = (smoothed ? frame.smoothedSceneDepth : nil) ?? frame.sceneDepth else { return [] }
         let depthMap = depthData.depthMap
         guard CVPixelBufferGetPixelFormatType(depthMap) == kCVPixelFormatType_DepthFloat32 else { return [] }
@@ -43,6 +51,23 @@ struct DepthProjector {
             if let confidenceMap { CVPixelBufferUnlockBaseAddress(confidenceMap, .readOnly) }
         }
         guard let depthBase = CVPixelBufferGetBaseAddress(depthMap) else { return [] }
+
+        // Optional colour lookup from the camera image (the depth map and image share one sensor orientation).
+        let image = frame.capturedImage
+        var imageLocked = false
+        if withColour,
+           CVPixelBufferGetPixelFormatType(image) == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+           CVPixelBufferGetPlaneCount(image) == 2,
+           CVPixelBufferLockBaseAddress(image, .readOnly) == kCVReturnSuccess {
+            imageLocked = true
+        }
+        defer { if imageLocked { CVPixelBufferUnlockBaseAddress(image, .readOnly) } }
+        let lumaBase = imageLocked ? CVPixelBufferGetBaseAddressOfPlane(image, 0) : nil
+        let chromaBase = imageLocked ? CVPixelBufferGetBaseAddressOfPlane(image, 1) : nil
+        let lumaStride = imageLocked ? CVPixelBufferGetBytesPerRowOfPlane(image, 0) : 0
+        let chromaStride = imageLocked ? CVPixelBufferGetBytesPerRowOfPlane(image, 1) : 0
+        let imageWidth = CVPixelBufferGetWidth(image)
+        let imageHeight = CVPixelBufferGetHeight(image)
 
         let imageSize = frame.camera.imageResolution
         guard imageSize.width > 0, imageSize.height > 0 else { return [] }
@@ -76,13 +101,29 @@ struct DepthProjector {
                 let point = cameraPoint(u: Float(u), v: Float(v), depth: depth, fx: fx, fy: fy, cx: cx, cy: cy)
                 let world = cameraToWorld * SIMD4<Float>(point.x, point.y, point.z, 1)
                 let rayY = (world.y - cameraToWorld.columns.3.y) / max(simd_length(point), 0.001)
+                var colour: SIMD3<Float>?
+                if let lumaBase, let chromaBase {
+                    let px = min(imageWidth - 1, u * imageWidth / width)
+                    let py = min(imageHeight - 1, v * imageHeight / height)
+                    let y = lumaBase.assumingMemoryBound(to: UInt8.self)[py * lumaStride + px]
+                    let chroma = chromaBase.assumingMemoryBound(to: UInt8.self)
+                    let offset = (py / 2) * chromaStride + (px / 2) * 2
+                    colour = rgb(y: y, cb: chroma[offset], cr: chroma[offset + 1])
+                }
                 output.append(WorldSample(
                     position: SIMD3<Float>(world.x, world.y, world.z),
                     weight: (confidence == ARConfidenceLevel.high.rawValue ? 2 : 1) * rangeWeight(depth: depth)
-                    * incidenceWeight(rayY: rayY)
+                    * incidenceWeight(rayY: rayY),
+                    colour: colour
                 ))
             }
         }
         return output
+    }
+}
+
+private extension SIMD3 where Scalar == Float {
+    var clamped01: SIMD3<Float> {
+        SIMD3<Float>(Swift.min(Swift.max(x, 0), 1), Swift.min(Swift.max(y, 0), 1), Swift.min(Swift.max(z, 0), 1))
     }
 }

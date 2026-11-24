@@ -37,6 +37,15 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
     @Published var zones: [ZoneStatus] = []
     @Published var coachMessage: String?
     @Published var edgeSuggestion: EdgeSuggestion?
+    @Published var thermalWarning: String?
+    @Published var cupCandidate: SIMD3<Float>?
+    @Published var conditions = ScanConditions()
+    @Published var capturePhoto: Bool {
+        didSet { UserDefaults.standard.set(capturePhoto, forKey: "greensight.capturePhoto") }
+    }
+    @Published var autoCupDetection: Bool {
+        didSet { UserDefaults.standard.set(autoCupDetection, forKey: "greensight.autoCup") }
+    }
     @Published var recoveryGuidance: String?
     @Published var loopGuidance: String?
     @Published var loopClosureMillimetres: Double?
@@ -91,6 +100,17 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
     private var checkpointInFlight = false
     private var draftGeneration = 0
     private var cupWorld: SIMD3<Float>?
+    private var pinMarkedAt: Date?
+    private let texture = GreenTextureAccumulator()
+    private var sampler = AdaptiveSampler()
+    private var thermalState = ProcessInfo.processInfo.thermalState
+    private var hottestThermal = ProcessInfo.processInfo.thermalState
+    private var scanStartedAt: Date?
+    private var framesProcessed = 0
+    private let cupDetector = LandmarkDetector()
+    private var cupCandidateCount = 0
+    private var cupCandidatePoint: SIMD3<Float>?
+    private var lastCupRejected: TimeInterval = 0
     private var trail = PositionTrail()
     private var lastFramePosition: SIMD3<Float>?
     private var lastFrameTime: Double = 0
@@ -106,8 +126,14 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
     override init() {
         depthSource = DepthSource(rawValue: UserDefaults.standard.string(forKey: "greensight.depthSource") ?? "") ?? .raw
         useWorldMap = UserDefaults.standard.object(forKey: "greensight.useWorldMap") as? Bool ?? true
+        capturePhoto = UserDefaults.standard.object(forKey: "greensight.capturePhoto") as? Bool ?? true
+        autoCupDetection = UserDefaults.standard.object(forKey: "greensight.autoCup") as? Bool ?? true
         walkMode = WalkMode(rawValue: UserDefaults.standard.string(forKey: "greensight.walkMode") ?? "") ?? .acrossGreen
         super.init()
+        NotificationCenter.default.addObserver(forName: ProcessInfo.thermalStateDidChangeNotification, object: nil,
+                                               queue: .main) { [weak self] _ in
+            self?.thermalChanged()
+        }
         location.onFirstFix = { [weak self] in
             DispatchQueue.main.async { self?.objectWillChange.send() }
         }
@@ -262,6 +288,16 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
         walkGuidance = nil
         cupLocal = nil
         cupWorld = nil
+        sampler.reset()
+        conditions = ScanConditions()
+        scanStartedAt = nil
+        framesProcessed = 0
+        hottestThermal = ProcessInfo.processInfo.thermalState
+        thermalWarning = ThermalPolicy(state: hottestThermal).warning
+        cupCandidate = nil
+        cupCandidatePoint = nil
+        cupCandidateCount = 0
+        pinMarkedAt = nil
         recoveryGuidance = nil
         loopGuidance = nil
         loopClosureMillimetres = nil
@@ -442,6 +478,8 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
         }
         edgeProblem = nil
         accumulator.configure(polygon: polygon, origin: origin, scanID: scanID)
+        texture.configure(polygon: polygon, origin: origin, scanID: scanID)
+        scanStartedAt = Date()
         renderer?.showEdge(edgeWorld, closed: true)
         publishMinimap(polygon: polygon, closed: true, good: [], weak: [])
         phase = .scanning
@@ -464,12 +502,20 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
         let aligned = headingAligned
         let depthSourceName = depthSource.rawValue
         let coordinate = originCoordinate
-        let cupPoint = cupLocal.map { EdgePoint(x: $0.x, z: $0.y) }
+        let cupPoint = cupWorld.map { EdgePoint(x: $0.x - origin.x, z: $0.z - origin.z, y: $0.y - origin.y) }
+        let pinDate = pinMarkedAt
+        let texture = self.texture
+        let started = scanStartedAt ?? Date()
+        let metadata = ScanMetadata(appVersion: ScanMetadata.appVersionString(), osVersion: UIDevice.current.systemVersion,
+                                    startedAt: started, durationSeconds: Date().timeIntervalSince(started),
+                                    framesProcessed: framesProcessed, hottestThermalState: hottestThermal.label,
+                                    conditions: conditions)
         let currentScan = scanID
         processingQueue.async { [weak self] in
             let record = Self.buildRecord(accumulator: accumulator, edge: edge, name: name, hole: hole,
                                           losses: losses, aligned: aligned, coordinate: coordinate,
-                                          depthSource: depthSourceName, cup: cupPoint)
+                                          depthSource: depthSourceName, cup: cupPoint, pinDate: pinDate,
+                                          image: texture.makeImage(), metadata: metadata)
             let suggestion = EdgeRefiner.suggest(edge: record.edgeVector, cells: record.cells,
                                                  outerCells: record.outerCells ?? [], cellSize: record.cellSize)
             DispatchQueue.main.async {
@@ -482,7 +528,8 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
 
     static func buildRecord(accumulator: GreenMapAccumulator, edge: [EdgePoint], name: String, hole: Int,
                                         losses: Int, aligned: Bool, coordinate: CLLocationCoordinate2D?,
-                                        depthSource: String, cup: EdgePoint? = nil) -> GreenMapRecord {
+                                        depthSource: String, cup: EdgePoint? = nil, pinDate: Date? = nil,
+                                        image: GreenImage? = nil, metadata: ScanMetadata? = nil) -> GreenMapRecord {
         let summary = accumulator.summary()
         let cells = accumulator.exportCells()
         let outerCells = accumulator.exportBandCells()
@@ -505,7 +552,8 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
             depthSource: depthSource, deviceModel: DeviceInfo.machine, cup: cup,
             loopClosureMillimetres: summary.loopClosureMillimetres,
             loopClosureResidualMillimetres: summary.loopClosureResidualMillimetres,
-            maxTiltPercent: summary.maxTiltPercent, outerCells: outerCells, edgeSource: "walked")
+            maxTiltPercent: summary.maxTiltPercent, outerCells: outerCells, edgeSource: "walked",
+            pinDate: pinDate, image: image, metadata: metadata)
     }
 
     // MARK: Drafts (resumable scans)
@@ -532,7 +580,7 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
     private func checkpoint(force: Bool, backgroundTask: Bool = false) {
         guard isMapping, !awaitingRelocalization, !edgeWorld.isEmpty else { return }
         let now = Date.timeIntervalSinceReferenceDate
-        let interval: TimeInterval = phase == .edge ? 8 : 30
+        let interval: TimeInterval = (phase == .edge ? 8 : 30) * ThermalPolicy(state: thermalState).checkpointScale
         guard force || now - lastCheckpoint >= interval else { return }
         guard !checkpointInFlight || now - lastCheckpoint > 60 else { return }
         lastCheckpoint = now
@@ -546,8 +594,10 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
                                           originLatitude: originCoordinate?.latitude,
                                           originLongitude: originCoordinate?.longitude,
                                           trackingLossCount: trackingLossCount, depthSource: depthSource.rawValue,
-                                          accumulator: nil, cupWorld: cupWorld)
+                                          accumulator: nil, cupWorld: cupWorld, pinDate: pinMarkedAt,
+                                          texture: nil, scanStartedAt: scanStartedAt, framesProcessed: framesProcessed)
         let accumulator = self.accumulator
+        let texture = self.texture
         let draftStore = self.draftStore
 
         let taskBox = BackgroundTaskBox()
@@ -573,6 +623,7 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
                 self.persistenceQueue.async {
                     var payload = basePayload
                     payload.accumulator = isScanning ? accumulator.snapshot() : nil
+                    payload.texture = isScanning ? texture.snapshot() : nil
                     let mapData = map.flatMap { try? NSKeyedArchiver.archivedData(withRootObject: $0, requiringSecureCoding: true) }
                     let saved = draftStore.save(header: header, payload: payload, worldMapData: mapData)
                     DispatchQueue.main.async {
@@ -622,10 +673,18 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
                 }
                 self.trackingLossCount = payload.trackingLossCount
                 self.cupWorld = payload.cupWorld
+                self.pinMarkedAt = payload.pinDate
                 self.cupLocal = payload.cupWorld.map { SIMD2<Float>($0.x - payload.origin.x, $0.z - payload.origin.z) }
                 self.restoredHeadingAligned = payload.headingAligned
                 if let snapshot = payload.accumulator {
                     self.accumulator.restore(snapshot, scanID: self.scanID)
+                    if let textureSnapshot = payload.texture {
+                        self.texture.restore(textureSnapshot, scanID: self.scanID)
+                    } else {
+                        self.texture.configure(polygon: self.localPolygon(), origin: self.origin, scanID: self.scanID)
+                    }
+                    self.scanStartedAt = payload.scanStartedAt
+                    self.framesProcessed = payload.framesProcessed ?? 0
                     self.phase = .scanning
                     self.coverage = header.coverage
                     self.regenerateWalkPlan()
@@ -657,6 +716,16 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
             }
             let recovered = GreenMapAccumulator()
             recovered.restore(snapshot, scanID: UUID())
+            var recoveredImage: GreenImage?
+            if let textureSnapshot = payload.texture {
+                let recoveredTexture = GreenTextureAccumulator()
+                recoveredTexture.restore(textureSnapshot, scanID: UUID())
+                recoveredImage = recoveredTexture.makeImage()
+            }
+            let started = payload.scanStartedAt ?? header.savedAt
+            let metadata = ScanMetadata(appVersion: ScanMetadata.appVersionString(), osVersion: UIDevice.current.systemVersion,
+                                        startedAt: started, durationSeconds: header.savedAt.timeIntervalSince(started),
+                                        framesProcessed: payload.framesProcessed ?? 0, hottestThermalState: "unknown")
             let edge = payload.edgeWorld.map {
                 EdgePoint(x: $0.x - payload.origin.x, z: $0.z - payload.origin.z, y: $0.y - payload.origin.y)
             }
@@ -668,7 +737,8 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
                                           hole: header.holeNumber, losses: payload.trackingLossCount,
                                           aligned: payload.headingAligned, coordinate: coordinate,
                                           depthSource: payload.depthSource,
-                                          cup: payload.cupWorld.map { EdgePoint(x: $0.x - payload.origin.x, z: $0.z - payload.origin.z) })
+                                          cup: payload.cupWorld.map { EdgePoint(x: $0.x - payload.origin.x, z: $0.z - payload.origin.z, y: $0.y - payload.origin.y) },
+                                          pinDate: payload.pinDate, image: recoveredImage, metadata: metadata)
             store.save(record)
             draftStore.delete()
             DispatchQueue.main.async {
@@ -721,7 +791,8 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
 
     @MainActor
     func saveReviewedGreen() {
-        guard let record = reviewRecord else { return }
+        guard var record = reviewRecord else { return }
+        record.metadata?.conditions = conditions
         records.insert(record, at: 0)
         let store = self.store
         persistenceQueue.async { store.save(record) }
@@ -802,6 +873,12 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
         lastFramePosition = camera
         lastFrameTime = frame.timestamp
 
+        if autoCupDetection, cupLocal == nil, cupCandidate == nil, phase == .scanning || phase == .edge,
+           n.isMultiple(of: 15), thermalState.rank < 2,
+           Date.timeIntervalSinceReferenceDate - lastCupRejected > 60 {
+            detectCup(frame: frame)
+        }
+
         if n.isMultiple(of: 10), !edgeWorld.isEmpty {
             let local = SIMD2<Float>(camera.x - origin.x, camera.z - origin.z)
             userPosition = local
@@ -823,17 +900,25 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
             addEdgePoint(position)
         case .scanning:
             updateCoach(frame: frame)
-            guard n.isMultiple(of: 3), !depthInFlight else { return }
+            let policy = ThermalPolicy(state: thermalState)
+            guard policy.processing, !depthInFlight else { return }
+            let decision = sampler.decide(transform: frame.camera.transform, timestamp: frame.timestamp,
+                                          coverage: coverage, policy: policy)
+            guard decision.process else { return }
             let id = scanID
             let timestamp = frame.timestamp
-            let wantPublish = timestamp - lastPublish >= 1.0
+            let wantPublish = timestamp - lastPublish >= policy.publishInterval
             let accumulator = self.accumulator
+            let texture = self.texture
             let smoothed = depthSource == .smoothed
+            let withColour = capturePhoto && policy.sampleColour
+            let stride = decision.stride
             depthInFlight = true
             processingQueue.async { [weak self] in
                 let output: (GreenMapAccumulator.Summary, [MapTile], [MapTile], [MapTile])? = autoreleasepool {
-                    let samples = DepthProjector.project(frame: frame, stride: 3, smoothed: smoothed)
+                    let samples = DepthProjector.project(frame: frame, stride: stride, smoothed: smoothed, withColour: withColour)
                     accumulator.ingest(samples, camera: camera, timestamp: timestamp, scanID: id)
+                    if withColour { texture.add(samples, scanID: id) }
                     guard wantPublish else { return nil }
                     let tiles = accumulator.tiles()
                     return (accumulator.summary(), tiles.good, tiles.weak, tiles.noisy)
@@ -841,6 +926,7 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.depthInFlight = false
+                    self.framesProcessed += 1
                     guard self.scanID == id, self.phase == .scanning, let output else { return }
                     self.lastPublish = timestamp
                     self.apply(summary: output.0, good: output.1, weak: output.2, noisy: output.3)
@@ -899,6 +985,62 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
     static func worstResidual(_ summary: GreenMapAccumulator.Summary) -> Double? {
         let values = [summary.residualMillimetres, summary.loopClosureResidualMillimetres].compactMap { $0 }
         return values.max() ?? summary.driftMillimetres
+    }
+
+    // MARK: Thermal budget and cup detection
+
+    private func thermalChanged() {
+        let state = ProcessInfo.processInfo.thermalState
+        thermalState = state
+        if state.rank > hottestThermal.rank { hottestThermal = state }
+        thermalWarning = isMapping ? ThermalPolicy(state: state).warning : nil
+        if state.rank >= 3, isMapping { checkpoint(force: true) }
+    }
+
+    /// Looks for a dark circle (a cup) in the camera image and proposes it; the walker confirms or dismisses it.
+    @MainActor
+    private func detectCup(frame: ARFrame) {
+        guard let view = arView, view.bounds.width > 0, view.bounds.height > 0 else { return }
+        let viewport = view.bounds.size
+        let orientation = view.window?.windowScene?.interfaceOrientation ?? .portrait
+        let transform = frame.displayTransform(for: orientation, viewportSize: viewport)
+        cupDetector.detect(in: frame.capturedImage, mode: .cup) { [weak self] candidate in
+            guard let self, let candidate, candidate.confidence > 0.75 else { return }
+            DispatchQueue.main.async {
+                guard self.cupLocal == nil, self.cupCandidate == nil, let view = self.arView else { return }
+                let image = CGPoint(x: candidate.normalizedCenter.x, y: 1 - candidate.normalizedCenter.y).applying(transform)
+                let point = CGPoint(x: image.x * viewport.width, y: image.y * viewport.height)
+                guard let world = self.raycast(point, in: view) else { return }
+                // Three sightings in the same place before a proposal is shown.
+                if let previous = self.cupCandidatePoint, simd_distance(previous, world) < 0.3 {
+                    self.cupCandidateCount += 1
+                } else {
+                    self.cupCandidateCount = 1
+                }
+                self.cupCandidatePoint = world
+                if self.cupCandidateCount >= 3 {
+                    self.cupCandidate = world
+                    self.cupCandidateCount = 0
+                    self.renderer?.showCup(world, keepOutRadius: 0.3)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    func acceptCupCandidate() {
+        guard let candidate = cupCandidate else { return }
+        cupCandidate = nil
+        setCup(at: candidate)
+    }
+
+    @MainActor
+    func dismissCupCandidate() {
+        cupCandidate = nil
+        cupCandidatePoint = nil
+        cupCandidateCount = 0
+        lastCupRejected = Date.timeIntervalSinceReferenceDate
+        renderer?.showCup(cupWorld, keepOutRadius: WalkPlanner.cupKeepOut)
     }
 
     // MARK: Loop closure, recovery and mapping hints
@@ -1006,8 +1148,14 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
             coachMessage = "No surface found at the crosshair. Aim at the cup and try again."
             return
         }
+        setCup(at: position)
+    }
+
+    @MainActor
+    private func setCup(at position: SIMD3<Float>) {
         cupWorld = position
         cupLocal = SIMD2<Float>(position.x - origin.x, position.z - origin.z)
+        pinMarkedAt = Date()
         renderer?.showCup(position, keepOutRadius: WalkPlanner.cupKeepOut)
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         regenerateWalkPlan()
@@ -1017,6 +1165,7 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
     func clearCup() {
         cupWorld = nil
         cupLocal = nil
+        pinMarkedAt = nil
         renderer?.showCup(nil, keepOutRadius: WalkPlanner.cupKeepOut)
         regenerateWalkPlan()
     }

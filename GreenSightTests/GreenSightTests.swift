@@ -259,6 +259,137 @@ final class GreenSightTests: XCTestCase {
         XCTAssertEqual(decoded.edge.count, 4)
     }
 
+    // MARK: Capture budget, colour image, metadata
+
+    func testThermalPolicyBacksOffAsPhoneHeatsUp() {
+        let nominal = ThermalPolicy(state: .nominal)
+        let serious = ThermalPolicy(state: .serious)
+        let critical = ThermalPolicy(state: .critical)
+        XCTAssertTrue(nominal.processing)
+        XCTAssertNil(nominal.warning)
+        XCTAssertEqual(nominal.extraStride, 0)
+        XCTAssertEqual(serious.extraStride, 2)
+        XCTAssertFalse(serious.sampleColour)
+        XCTAssertNotNil(serious.warning)
+        XCTAssertGreaterThan(serious.minimumInterval, nominal.minimumInterval)
+        XCTAssertFalse(critical.processing)
+        XCTAssertGreaterThan(critical.checkpointScale, serious.checkpointScale)
+    }
+
+    func testSamplerSkipsStillFramesAndProcessesNewViews() {
+        var sampler = AdaptiveSampler()
+        let policy = ThermalPolicy(state: .nominal)
+        let still = cameraPose(position: SIMD3<Float>(0, 1.5, 0), forward: SIMD3<Float>(0, -0.6, -0.8))
+        let moved = cameraPose(position: SIMD3<Float>(0.2, 1.5, 0), forward: SIMD3<Float>(0, -0.6, -0.8))
+        XCTAssertTrue(sampler.decide(transform: still, timestamp: 0, coverage: 0, policy: policy).process)
+        XCTAssertFalse(sampler.decide(transform: still, timestamp: 0.2, coverage: 0, policy: policy).process)
+        XCTAssertFalse(sampler.decide(transform: moved, timestamp: 0.05, coverage: 0, policy: policy).process, "too soon")
+        XCTAssertTrue(sampler.decide(transform: moved, timestamp: 0.5, coverage: 0, policy: policy).process)
+        XCTAssertFalse(sampler.decide(transform: moved, timestamp: 1.0, coverage: 0, policy: policy).process)
+        // Standing still for over a second still adds a frame, to average out noise.
+        XCTAssertTrue(sampler.decide(transform: moved, timestamp: 1.6, coverage: 0, policy: policy).process)
+        let turned = cameraPose(position: SIMD3<Float>(0.2, 1.5, 0), forward: SIMD3<Float>(0.3, -0.6, -0.8))
+        XCTAssertTrue(sampler.decide(transform: turned, timestamp: 1.8, coverage: 0, policy: policy).process)
+    }
+
+    func testSamplerReadsDepthMoreCoarselyOnceCoveredOrHot() {
+        var sampler = AdaptiveSampler()
+        let pose = cameraPose(position: SIMD3<Float>(0, 1.5, 0), forward: SIMD3<Float>(0, -0.6, -0.8))
+        XCTAssertEqual(sampler.decide(transform: pose, timestamp: 0, coverage: 0.5, policy: ThermalPolicy(state: .nominal)).stride, 3)
+        XCTAssertEqual(sampler.decide(transform: pose, timestamp: 5, coverage: 0.9, policy: ThermalPolicy(state: .nominal)).stride, 4)
+        XCTAssertEqual(sampler.decide(transform: pose, timestamp: 10, coverage: 0.5, policy: ThermalPolicy(state: .serious)).stride, 5)
+        XCTAssertEqual(sampler.decide(transform: pose, timestamp: 15, coverage: 0.9, policy: ThermalPolicy(state: .critical)).stride, 6)
+    }
+
+    func testYCbCrConversion() {
+        let grey = DepthProjector.rgb(y: 128, cb: 128, cr: 128)
+        XCTAssertEqual(grey.x, 0.502, accuracy: 0.01)
+        XCTAssertEqual(grey.y, 0.502, accuracy: 0.01)
+        XCTAssertEqual(grey.z, 0.502, accuracy: 0.01)
+        let reddish = DepthProjector.rgb(y: 100, cb: 100, cr: 200)
+        XCTAssertGreaterThan(reddish.x, reddish.y)
+        XCTAssertGreaterThan(reddish.x, reddish.z)
+        XCTAssertLessThanOrEqual(DepthProjector.rgb(y: 255, cb: 255, cr: 255).max(), 1)
+    }
+
+    private func colouredSamples(_ colour: SIMD3<Float>, at point: SIMD2<Float>, height: Float = 0, count: Int = 3) -> [WorldSample] {
+        (0..<count).map { _ in WorldSample(position: SIMD3<Float>(point.x, height, point.y), weight: 1, colour: colour) }
+    }
+
+    func testTextureAveragesGroundColoursAndIgnoresHighPoints() throws {
+        let texture = GreenTextureAccumulator()
+        let id = UUID()
+        texture.configure(polygon: square, origin: .zero, scanID: id)
+        texture.add(colouredSamples(SIMD3<Float>(1, 0, 0), at: SIMD2<Float>(1.05, 1.05)), scanID: id)
+        texture.add(colouredSamples(SIMD3<Float>(0, 0, 1), at: SIMD2<Float>(1.05, 1.05), count: 3), scanID: id)
+        // Something at head height (a person) must not colour the ground.
+        texture.add(colouredSamples(SIMD3<Float>(0, 1, 0), at: SIMD2<Float>(3, 3), height: 1.5), scanID: id)
+        texture.add(colouredSamples(SIMD3<Float>(0, 1, 0), at: SIMD2<Float>(2, 2)), scanID: UUID())
+        let mixed = try XCTUnwrap(texture.colour(atLocal: SIMD2<Float>(1.07, 1.07)))
+        XCTAssertEqual(mixed.x, 0.5, accuracy: 0.01)
+        XCTAssertEqual(mixed.z, 0.5, accuracy: 0.01)
+        XCTAssertNil(texture.colour(atLocal: SIMD2<Float>(3, 3)))
+        XCTAssertNil(texture.colour(atLocal: SIMD2<Float>(2, 2)))
+
+        let image = try XCTUnwrap(texture.makeImage())
+        // 4 m outline plus a 1 m strip each side at 10 cm texels.
+        XCTAssertGreaterThanOrEqual(image.width, 60)
+        XCTAssertNotNil(image.uiImage)
+        XCTAssertEqual(image.minX, -1, accuracy: 0.11)
+    }
+
+    func testTextureSnapshotRestoresColours() throws {
+        let texture = GreenTextureAccumulator()
+        let id = UUID()
+        texture.configure(polygon: square, origin: SIMD3<Float>(1, 0, 1), scanID: id)
+        texture.add(colouredSamples(SIMD3<Float>(0.2, 0.6, 0.1), at: SIMD2<Float>(3, 3)), scanID: id)
+        let plist = PropertyListEncoder(); plist.outputFormat = .binary
+        let snapshot = try PropertyListDecoder().decode(GreenTextureAccumulator.Snapshot.self,
+                                                        from: plist.encode(try XCTUnwrap(texture.snapshot())))
+        let restored = GreenTextureAccumulator()
+        restored.restore(snapshot, scanID: UUID())
+        let colour = try XCTUnwrap(restored.colour(atLocal: SIMD2<Float>(2, 2)))
+        XCTAssertEqual(colour.y, 0.6, accuracy: 0.01)
+    }
+
+    func testMetadataImageAndPinDateRoundTrip() throws {
+        var record = editableRecord()
+        record.pinDate = Date(timeIntervalSince1970: 1_700_000_000)
+        record.image = GreenImage(width: 1, height: 1, texelSize: 0.1, minX: 0, minZ: 0, png: Data([1, 2, 3]))
+        record.metadata = ScanMetadata(appVersion: "1.11 (12)", osVersion: "17.5", startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                                       durationSeconds: 600, framesProcessed: 1200, hottestThermalState: "fair",
+                                       conditions: ScanConditions(surface: "dew", light: "overcast", stimpFeet: 10.5))
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(GreenMapRecord.self, from: encoder.encode(record))
+        XCTAssertEqual(decoded.metadata?.conditions.surface, "dew")
+        XCTAssertEqual(decoded.metadata?.conditions.stimpFeet, 10.5)
+        XCTAssertEqual(decoded.metadata?.framesProcessed, 1200)
+        XCTAssertEqual(decoded.image?.png, Data([1, 2, 3]))
+        XCTAssertEqual(decoded.pinDate, record.pinDate)
+        // Records saved before these fields existed still decode.
+        let plain = try decoder.decode(GreenMapRecord.self, from: encoder.encode(editableRecord()))
+        XCTAssertNil(plain.metadata)
+        XCTAssertNil(plain.image)
+    }
+
+    func testMergeKeepsTheNewestPin() throws {
+        var older = syntheticScan(angle: 0, origin: .zero, verticalOffset: 0, quality: 0.9)
+        older.cup = EdgePoint(x: 3, z: 3)
+        older.pinDate = Date(timeIntervalSince1970: 1_700_000_000)
+        var newer = syntheticScan(angle: 40 * .pi / 180, origin: SIMD2(3, 2), verticalOffset: 0.0, quality: 0.7)
+        // The newer pin is at world (6, 2); express it in that scan's rotated frame.
+        let angle = 40 * Float.pi / 180
+        let delta = SIMD2<Float>(6, 2) - SIMD2<Float>(3, 2)
+        newer.cup = EdgePoint(x: cos(angle) * delta.x + sin(angle) * delta.y, z: -sin(angle) * delta.x + cos(angle) * delta.y)
+        newer.pinDate = Date(timeIntervalSince1970: 1_710_000_000)
+        let result = try GreenMerger.merge([older, newer])
+        let cup = try XCTUnwrap(result.record.cup)
+        XCTAssertEqual(cup.x, 6, accuracy: 0.7)
+        XCTAssertEqual(cup.z, 2, accuracy: 0.7)
+        XCTAssertEqual(result.record.pinDate, newer.pinDate)
+    }
+
     // MARK: Edge refinement, editing and heights
 
     private let walkedOutline: [SIMD2<Float>] = [SIMD2(0, 0), SIMD2(14, 0), SIMD2(14, 10), SIMD2(0, 10)]

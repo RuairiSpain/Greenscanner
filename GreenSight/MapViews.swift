@@ -161,10 +161,20 @@ struct GreenDetailView: View {
     @EnvironmentObject private var model: MapModel
     let record: GreenMapRecord
     @State private var exportURL: URL?
+    @State private var photo: UIImage?
+    @State private var layer: SlopeLayer = .slope
 
     var body: some View {
         List {
-            Section { MapSlopeView(record: record).listRowInsets(EdgeInsets()) }
+            Section {
+                MapSlopeView(record: record, photo: photo, layer: layer).listRowInsets(EdgeInsets())
+                if record.image != nil {
+                    Picker("Layer", selection: $layer) {
+                        ForEach(SlopeLayer.allCases) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                }
+            }
             Section("Scan") {
                 LabeledContent("Coverage", value: record.coverage.formatted(.percent.precision(.fractionLength(0))))
                 LabeledContent("Quality", value: record.qualityScore.formatted(.percent.precision(.fractionLength(0))))
@@ -208,13 +218,41 @@ struct GreenDetailView: View {
                 }
                 LabeledContent("Edge heights stored", value: (record.edge.allSatisfy { $0.y != nil }) ? "Yes" : "Partly")
             }
+            captureDetails
             ValidationSection(record: record)
             if let url = exportURL {
                 Section { ShareLink(item: url) { Label("Export green file", systemImage: "square.and.arrow.up") } }
             }
         }
         .navigationTitle("\(record.courseName) \(record.holeNumber)")
-        .task { exportURL = await model.prepareExport(record) }
+        .task {
+            exportURL = await model.prepareExport(record)
+            photo = record.image?.uiImage
+        }
+    }
+
+    @ViewBuilder
+    private var captureDetails: some View {
+        Section("Capture details") {
+            if let cup = record.cup {
+                LabeledContent("Cup", value: cup.y.map { String(format: "marked, %.0f cm above start", $0 * 100) } ?? "marked")
+            }
+            if let pin = record.pinDate {
+                LabeledContent("Pin position as of", value: pin.formatted(date: .abbreviated, time: .shortened))
+            }
+            if let meta = record.metadata {
+                LabeledContent("Scanned", value: meta.startedAt.formatted(date: .abbreviated, time: .shortened))
+                LabeledContent("Duration", value: String(format: "%.0f min", meta.durationSeconds / 60))
+                LabeledContent("Frames processed", value: "\(meta.framesProcessed)")
+                LabeledContent("Phone temperature (peak)", value: meta.hottestThermalState)
+                LabeledContent("App / iOS", value: "\(meta.appVersion) / \(meta.osVersion)")
+                if let surface = meta.conditions.surface { LabeledContent("Surface", value: surface) }
+                if let light = meta.conditions.light { LabeledContent("Light", value: light) }
+                if let stimp = meta.conditions.stimpFeet { LabeledContent("Green speed", value: String(format: "Stimp %.1f", stimp)) }
+            }
+            if let device = record.deviceModel { LabeledContent("Device", value: device) }
+            if let source = record.depthSource { LabeledContent("Depth source", value: source) }
+        }
     }
 }
 
@@ -552,10 +590,19 @@ private extension CGPoint {
 
 // MARK: Slope view
 
+enum SlopeLayer: String, CaseIterable, Identifiable {
+    case slope, photo, both
+    var id: String { rawValue }
+    var label: String { self == .slope ? "Slope" : (self == .photo ? "Photo" : "Both") }
+}
+
 struct MapSlopeView: View {
     let record: GreenMapRecord
     /// Optional second outline drawn dashed in cyan, for example a suggested fringe.
     var overlayOutline: [SIMD2<Float>]? = nil
+    /// Decoded colour image and which layers to draw.
+    var photo: UIImage? = nil
+    var layer: SlopeLayer = .slope
 
     var body: some View {
         let grades = MapSlope.grades(cells: record.cells, cellSize: record.cellSize)
@@ -572,10 +619,19 @@ struct MapSlopeView: View {
                     CGPoint(x: offsetX + Double(x - bounds.min.x) * scale, y: offsetY + Double(z - bounds.min.y) * scale)
                 }
                 let cell = CGFloat(Double(record.cellSize) * scale)
-                for (index, mapCell) in record.cells.enumerated() {
-                    let origin = point(Float(mapCell.ix) * record.cellSize, Float(mapCell.iz) * record.cellSize)
-                    let rect = CGRect(x: origin.x, y: origin.y, width: cell + 0.5, height: cell + 0.5)
-                    context.fill(Path(rect), with: .color(Self.color(grade: Double(grades[index]))))
+                if layer != .slope, let photo, let image = record.image {
+                    let corner = point(image.minX, image.minZ)
+                    context.draw(Image(uiImage: photo),
+                                 in: CGRect(x: corner.x, y: corner.y, width: CGFloat(Double(image.widthMetres) * scale),
+                                            height: CGFloat(Double(image.heightMetres) * scale)))
+                }
+                if layer != .photo || photo == nil {
+                    let opacity = (layer == .both && photo != nil) ? 0.45 : 1.0
+                    for (index, mapCell) in record.cells.enumerated() {
+                        let origin = point(Float(mapCell.ix) * record.cellSize, Float(mapCell.iz) * record.cellSize)
+                        let rect = CGRect(x: origin.x, y: origin.y, width: cell + 0.5, height: cell + 0.5)
+                        context.fill(Path(rect), with: .color(Self.color(grade: Double(grades[index])).opacity(opacity)))
+                    }
                 }
                 var outline = Path()
                 for (index, vertex) in polygon.enumerated() {
@@ -816,6 +872,10 @@ struct MapScanScreen: View {
                 Text(instruction).font(.subheadline.weight(.semibold))
                 Text("\(model.courseName) · Hole \(model.holeNumber) · \(model.trackingText)")
                     .font(.caption).foregroundStyle(.secondary)
+                if let heat = model.thermalWarning, model.phase != .review {
+                    Label(heat, systemImage: "thermometer.high")
+                        .font(.caption.weight(.semibold)).foregroundStyle(.red)
+                }
                 if let hint = model.mappingHint {
                     Text(hint).font(.caption2).foregroundStyle(.secondary)
                 }
@@ -852,6 +912,14 @@ struct MapScanScreen: View {
     @ViewBuilder
     private var controls: some View {
         VStack(spacing: 10) {
+            if model.cupCandidate != nil {
+                HStack {
+                    Label("That looks like the cup.", systemImage: "flag.fill").font(.caption.weight(.semibold))
+                    Spacer()
+                    Button("Not the cup") { model.dismissCupCandidate() }.buttonStyle(.bordered).font(.caption)
+                    Button("Mark cup") { model.acceptCupCandidate() }.buttonStyle(.borderedProminent).tint(.mint).font(.caption)
+                }
+            }
             if model.awaitingRelocalization {
                 Text("Waiting for the camera to recognise the spot. If it does not, you can keep the saved scan for later or save what was captured.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -967,6 +1035,7 @@ struct MapScanScreen: View {
                     stat("Coverage", record.coverage)
                     stat("Quality", record.qualityScore)
                 }
+                conditionsEditor
                 if let suggestion = model.edgeSuggestion {
                     VStack(alignment: .leading, spacing: 6) {
                         Label(String(format: "The scan shows rougher grass beyond your outline along %.0f%% of the edge (typically %.0f cm out). The dashed cyan line follows it.",
@@ -1001,6 +1070,32 @@ struct MapScanScreen: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.regularMaterial)
         .ignoresSafeArea()
+    }
+
+    private var conditionsEditor: some View {
+        VStack(spacing: 6) {
+            HStack {
+                Picker("Surface", selection: Binding(get: { model.conditions.surface ?? "" },
+                                                     set: { model.conditions.surface = $0.isEmpty ? nil : $0 })) {
+                    Text("Surface").tag("")
+                    ForEach(["dry", "dew", "damp", "wet"], id: \.self) { Text($0.capitalized).tag($0) }
+                }
+                Picker("Light", selection: Binding(get: { model.conditions.light ?? "" },
+                                                   set: { model.conditions.light = $0.isEmpty ? nil : $0 })) {
+                    Text("Light").tag("")
+                    ForEach(["bright", "overcast", "low"], id: \.self) { Text($0.capitalized).tag($0) }
+                }
+                Menu(model.conditions.stimpFeet.map { String(format: "Stimp %.1f", $0) } ?? "Stimp") {
+                    Button("Not known") { model.conditions.stimpFeet = nil }
+                    ForEach(Array(stride(from: 7.0, through: 14.0, by: 0.5)), id: \.self) { value in
+                        Button(String(format: "%.1f", value)) { model.conditions.stimpFeet = value }
+                    }
+                }
+            }
+            .font(.caption)
+            Text("Optional: conditions help compare scans and explain differences in green speed.")
+                .font(.caption2).foregroundStyle(.secondary)
+        }
     }
 
     private func stat(_ title: String, _ value: Double) -> some View {

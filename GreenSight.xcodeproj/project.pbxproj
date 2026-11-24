@@ -16,6 +16,12 @@
 		1905DF9D4F2A0906663BA2FE = {
 			isa = PBXBuildFile; fileRef = 4EF3E64ADD20787FFEA4ECFB /* ARScreen.swift */;
 		};
+		E7EBD10BF792A3A5F158A8E3 = {
+			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AdaptiveSampling.swift"; sourceTree = "<group>";
+		};
+		B38657FA7DB0282F6042A200 = {
+			isa = PBXBuildFile; fileRef = E7EBD10BF792A3A5F158A8E3 /* AdaptiveSampling.swift */;
+		};
 		4B0A572A11366125B8EEFB6D = {
 			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppModel.swift"; sourceTree = "<group>";
 		};
@@ -87,6 +93,12 @@
 		};
 		A86393D90B50C3A4D45348D6 = {
 			isa = PBXBuildFile; fileRef = 77A6495A83A5496584231556 /* GreenSightApp.swift */;
+		};
+		51201330849F5942ED4B623E = {
+			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GreenTexture.swift"; sourceTree = "<group>";
+		};
+		28202F4819AAA6D351E4D31A = {
+			isa = PBXBuildFile; fileRef = 51201330849F5942ED4B623E /* GreenTexture.swift */;
 		};
 		329EDA1D083BC18999101C68 = {
 			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "HeatMapView.swift"; sourceTree = "<group>";
@@ -216,6 +228,7 @@
 			children = (
 				F6C1DEA1627E2654CE391908 /* ARRenderer.swift */,
 				4EF3E64ADD20787FFEA4ECFB /* ARScreen.swift */,
+				E7EBD10BF792A3A5F158A8E3 /* AdaptiveSampling.swift */,
 				4B0A572A11366125B8EEFB6D /* AppModel.swift */,
 				EDF27BD80B9353A84C5E7023 /* ContentView.swift */,
 				052FEDCDD6152B61E1D45BC4 /* DemoFactory.swift */,
@@ -228,6 +241,7 @@
 				55DF34BCEB060EBB9ACFDED4 /* GreenMapStore.swift */,
 				282F8DA6ACDDACFE55E9CD6B /* GreenMerge.swift */,
 				77A6495A83A5496584231556 /* GreenSightApp.swift */,
+				51201330849F5942ED4B623E /* GreenTexture.swift */,
 				329EDA1D083BC18999101C68 /* HeatMapView.swift */,
 				D38401287CC72B2C2FF98118 /* HeightMap.swift */,
 				BCFE8A313C1CFA8D7C3A8D20 /* HistoryView.swift */,
@@ -267,6 +281,7 @@
 			isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (
 				FBCA85C56D4F2A8C517C36FB /* ARRenderer.swift in Sources */,
 				1905DF9D4F2A0906663BA2FE /* ARScreen.swift in Sources */,
+				B38657FA7DB0282F6042A200 /* AdaptiveSampling.swift in Sources */,
 				D7859483CFC98D5FF2593E21 /* AppModel.swift in Sources */,
 				3515404FF8FDBB221A5E7E05 /* ContentView.swift in Sources */,
 				C91C65FA76EC58B06B1A225C /* DemoFactory.swift in Sources */,
@@ -279,6 +294,7 @@
 				61DC4F8BCBD865EE1F2A53AA /* GreenMapStore.swift in Sources */,
 				43CE215EE2245341FCC4C7EF /* GreenMerge.swift in Sources */,
 				A86393D90B50C3A4D45348D6 /* GreenSightApp.swift in Sources */,
+				28202F4819AAA6D351E4D31A /* GreenTexture.swift in Sources */,
 				8F23CAEA24BEB0782BEE03C8 /* HeatMapView.swift in Sources */,
 				83E456D388675F9043721EBF /* HeightMap.swift in Sources */,
 				E4E7EE32103D597FF12C8A71 /* HistoryView.swift in Sources */,
@@ -367,11 +383,11 @@
 				ASSETCATALOG_COMPILER_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 12;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = GreenSight/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.10;
+				MARKETING_VERSION = 1.11;
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.GreenSight;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -389,11 +405,11 @@
 				ASSETCATALOG_COMPILER_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 11;
+				CURRENT_PROJECT_VERSION = 12;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = GreenSight/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.10;
+				MARKETING_VERSION = 1.11;
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.GreenSight;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;

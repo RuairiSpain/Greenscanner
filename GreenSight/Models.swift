@@ -4,6 +4,8 @@ import simd
 struct WorldSample: Sendable {
     let position: SIMD3<Float>
     let weight: Float
+    /// Camera colour at this point (red, green, blue in 0...1), when colour sampling is on.
+    var colour: SIMD3<Float>? = nil
 }
 
 struct GreenBasis: Sendable {

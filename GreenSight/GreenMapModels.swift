@@ -92,8 +92,39 @@ struct GreenMapRecord: Codable, Identifiable, Sendable {
     var outerCells: [MapCell]? = nil
     /// How the outline was made: "walked", "refined" (snapped to detected fringe) or "edited" (by hand).
     var edgeSource: String? = nil
+    /// When the cup position was marked. Pins move, so this dates the cup.
+    var pinDate: Date? = nil
+    /// Low-resolution top-down colour image of the green, if captured.
+    var image: GreenImage? = nil
+    var metadata: ScanMetadata? = nil
 
     var edgeVector: [SIMD2<Float>] { edge.map(\.vector) }
+}
+
+/// Conditions the walker can record; they affect both depth quality and how fast the green plays.
+struct ScanConditions: Codable, Sendable, Equatable {
+    /// "dry", "dew", "damp" or "wet".
+    var surface: String? = nil
+    /// "bright", "overcast" or "low".
+    var light: String? = nil
+    var stimpFeet: Double? = nil
+}
+
+struct ScanMetadata: Codable, Sendable {
+    var appVersion: String
+    var osVersion: String
+    var startedAt: Date
+    var durationSeconds: Double
+    var framesProcessed: Int
+    var hottestThermalState: String
+    var conditions: ScanConditions = ScanConditions()
+
+    static func appVersionString() -> String {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        return "\(version) (\(build))"
+    }
 }
 
 enum DepthSource: String, CaseIterable, Identifiable, Sendable {

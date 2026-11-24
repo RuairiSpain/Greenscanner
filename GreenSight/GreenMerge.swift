@@ -360,6 +360,9 @@ enum GreenMerger {
         }
 
         var polygons = [referencePolygon]
+        // Pins move between days: keep the cup from the most recently marked pin.
+        var pins: [(point: SIMD2<Float>, y: Float?, date: Date)] = []
+        if let cup = reference.cup { pins.append((cup.vector, cup.y, reference.pinDate ?? reference.createdAt)) }
         var used = [reference]
         var skipped: [String] = []
         var residuals: [Float] = []
@@ -450,6 +453,7 @@ enum GreenMerger {
             }
             residuals.append(median(afterCorrection))
             polygons.append(other.edgeVector.map { alignment.apply($0) })
+            if let cup = other.cup { pins.append((alignment.apply(cup.vector), cup.y, other.pinDate ?? other.createdAt)) }
             used.append(other)
             lowestOverlap = min(lowestOverlap, alignment.overlap)
         }
@@ -491,6 +495,7 @@ enum GreenMerger {
         let quality = (coverage * (totalCells > 0 ? weighted / totalCells : 0)).clamped(to: 0...1)
         let residualMM = residuals.isEmpty ? nil : Double(residuals.max() ?? 0) * 1000
 
+        let newestPin = pins.max { $0.date < $1.date }
         let outlineHeights = GreenEdit.edgeHeights(polygon: union.outline, pool: cells, cellSize: size)
         let record = GreenMapRecord(
             id: UUID(), courseName: reference.courseName, holeNumber: reference.holeNumber, createdAt: Date(),
@@ -501,7 +506,9 @@ enum GreenMerger {
             trackingLossCount: used.reduce(0) { $0 + $1.trackingLossCount },
             isPartial: coverage < 0.85, headingAligned: reference.headingAligned,
             originLatitude: reference.originLatitude, originLongitude: reference.originLongitude,
-            sourceIDs: used.map(\.id), sourceScanCount: used.count, edgeSource: "merged")
+            sourceIDs: used.map(\.id), sourceScanCount: used.count,
+            cup: newestPin.map { EdgePoint(x: $0.point.x, z: $0.point.y, y: $0.y) }, edgeSource: "merged",
+            pinDate: newestPin?.date)
         return MergeResult(record: record, usedCount: used.count, skipped: skipped,
                            residualMillimetres: residualMM, minimumOverlap: Double(lowestOverlap))
     }
