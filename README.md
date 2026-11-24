@@ -172,3 +172,13 @@ While mapping, the session is checkpointed to disk: every 8 s while marking the 
 - **Discard** deletes the draft.
 
 Cancel asks for confirmation when there is real progress to lose. Starting a new scan is blocked while a draft exists.
+
+### Walking guide (v1.8)
+
+While scanning, a "Walk guide" control plans where to walk:
+
+- **Across** sweeps parallel lanes along the green's long axis, about 3 m apart so passes overlap, starting from the end nearest the walker. The route is drawn on the ground in AR as a cyan ribbon with a pole at the next marker, and dashed on the minimap with the walked part in white. Optionally mark the cup at the crosshair: the route then detours around a 1.2 m keep-out circle (drawn red) so nobody steps near the hole. The cup position is saved with the green.
+- **Fringe only** walks a route about 1 m outside the edge so the putting surface is never entered. From the fringe only the outer band of the green is within depth reach, so the app shows the share it expects to reach and the saved scan will be partial.
+- **Off** shows no route.
+
+Progress advances as the walker comes within 1.2 m of the next few waypoints, and the guide says when the walker is off the route. The app has no data about other players' balls or lines; the guide only keeps clear of the cup surround and reminds the user not to walk another player's line. Check the course rules before walking on a green.

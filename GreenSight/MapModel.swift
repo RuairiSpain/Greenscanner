@@ -36,6 +36,11 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
     @Published var zoneGuidance = "Walk the inside and cover the grey areas on the map."
     @Published var zones: [ZoneStatus] = []
     @Published var coachMessage: String?
+    @Published var walkMode: WalkMode
+    @Published var walkPlan: WalkPlan = .empty
+    @Published var walkIndex = 0
+    @Published var walkGuidance: String?
+    @Published var cupLocal: SIMD2<Float>?
     @Published var draft: MapDraftHeader?
     @Published var draftBusy = false
     @Published var awaitingRelocalization = false
@@ -75,11 +80,13 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
     private var lastCheckpoint: TimeInterval = 0
     private var checkpointInFlight = false
     private var draftGeneration = 0
+    private var cupWorld: SIMD3<Float>?
     private var lastMappingStatus: ARFrame.WorldMappingStatus = .notAvailable
     private var lastCoachHaptic: TimeInterval = 0
 
     override init() {
         depthSource = DepthSource(rawValue: UserDefaults.standard.string(forKey: "greensight.depthSource") ?? "") ?? .raw
+        walkMode = WalkMode(rawValue: UserDefaults.standard.string(forKey: "greensight.walkMode") ?? "") ?? .acrossGreen
         super.init()
         location.onFirstFix = { [weak self] in
             DispatchQueue.main.async { self?.objectWillChange.send() }
@@ -230,6 +237,11 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
         zones = []
         coachMessage = nil
         coach.reset()
+        walkPlan = .empty
+        walkIndex = 0
+        walkGuidance = nil
+        cupLocal = nil
+        cupWorld = nil
         zoneGuidance = "Walk the inside and cover the grey areas on the map."
         trackingLossCount = 0
         minimap = .empty
@@ -284,6 +296,8 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
         if !edgeWorld.isEmpty {
             renderer?.showEdge(edgeWorld, closed: phase != .edge)
             publishMinimap(polygon: localPolygon(), closed: phase != .edge, good: [], weak: [])
+            renderer?.showCup(cupWorld, keepOutRadius: WalkPlanner.cupKeepOut)
+            refreshWalkRender()
         }
     }
 
@@ -396,6 +410,7 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
         publishMinimap(polygon: polygon, closed: true, good: [], weak: [])
         phase = .scanning
         UINotificationFeedbackGenerator().notificationOccurred(.success)
+        regenerateWalkPlan()
         checkpoint(force: true)
     }
 
@@ -413,11 +428,12 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
         let aligned = headingAligned
         let depthSourceName = depthSource.rawValue
         let coordinate = originCoordinate
+        let cupPoint = cupLocal.map { EdgePoint(x: $0.x, z: $0.y) }
         let currentScan = scanID
         processingQueue.async { [weak self] in
             let record = Self.buildRecord(accumulator: accumulator, edge: edge, name: name, hole: hole,
                                           losses: losses, aligned: aligned, coordinate: coordinate,
-                                          depthSource: depthSourceName)
+                                          depthSource: depthSourceName, cup: cupPoint)
             DispatchQueue.main.async {
                 guard let self, self.scanID == currentScan, self.phase == .review else { return }
                 self.reviewRecord = record
@@ -427,7 +443,7 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
 
     static func buildRecord(accumulator: GreenMapAccumulator, edge: [EdgePoint], name: String, hole: Int,
                                         losses: Int, aligned: Bool, coordinate: CLLocationCoordinate2D?,
-                                        depthSource: String) -> GreenMapRecord {
+                                        depthSource: String, cup: EdgePoint? = nil) -> GreenMapRecord {
         let summary = accumulator.summary()
         let cells = accumulator.exportCells()
         let quality = MapQuality.score(coverage: summary.coverage, goodShare: summary.goodShare,
@@ -442,7 +458,7 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
             originLatitude: coordinate?.latitude, originLongitude: coordinate?.longitude,
             zoneCount: summary.zones.count, residualMillimetres: summary.residualMillimetres,
             maxCorrectionMillimetres: summary.maxCorrectionMillimetres, unlinkedZones: summary.unlinkedZones,
-            depthSource: depthSource, deviceModel: DeviceInfo.machine)
+            depthSource: depthSource, deviceModel: DeviceInfo.machine, cup: cup)
     }
 
     // MARK: Drafts (resumable scans)
@@ -483,7 +499,7 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
                                           originLatitude: originCoordinate?.latitude,
                                           originLongitude: originCoordinate?.longitude,
                                           trackingLossCount: trackingLossCount, depthSource: depthSource.rawValue,
-                                          accumulator: nil)
+                                          accumulator: nil, cupWorld: cupWorld)
         let accumulator = self.accumulator
         let draftStore = self.draftStore
 
@@ -558,11 +574,14 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
                     self.originCoordinate = CLLocationCoordinate2D(latitude: lat, longitude: lon)
                 }
                 self.trackingLossCount = payload.trackingLossCount
+                self.cupWorld = payload.cupWorld
+                self.cupLocal = payload.cupWorld.map { SIMD2<Float>($0.x - payload.origin.x, $0.z - payload.origin.z) }
                 self.restoredHeadingAligned = payload.headingAligned
                 if let snapshot = payload.accumulator {
                     self.accumulator.restore(snapshot, scanID: self.scanID)
                     self.phase = .scanning
                     self.coverage = header.coverage
+                    self.regenerateWalkPlan()
                 } else {
                     self.phase = .edge
                 }
@@ -599,7 +618,8 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
             let record = Self.buildRecord(accumulator: recovered, edge: edge, name: header.courseName,
                                           hole: header.holeNumber, losses: payload.trackingLossCount,
                                           aligned: payload.headingAligned, coordinate: coordinate,
-                                          depthSource: payload.depthSource)
+                                          depthSource: payload.depthSource,
+                                          cup: payload.cupWorld.map { EdgePoint(x: $0.x - payload.origin.x, z: $0.z - payload.origin.z) })
             store.save(record)
             draftStore.delete()
             DispatchQueue.main.async {
@@ -704,6 +724,7 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
 
         if n.isMultiple(of: 10), !edgeWorld.isEmpty {
             userPosition = SIMD2<Float>(camera.x - origin.x, camera.z - origin.z)
+            updateWalkProgress()
         }
 
         switch phase {
@@ -782,7 +803,128 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
                                 noisy: [SIMD2<Float>] = [], zones: [ZoneStatus] = [], highlight: Int? = nil) {
         minimapVersion += 1
         minimap = MiniMapSnapshot(version: minimapVersion, polygon: polygon, closed: closed, good: good, weak: weak,
-                                  noisy: noisy, zones: zones, highlightZone: highlight)
+                                  noisy: noisy, walkPath: walkPlan.path, cup: cupLocal,
+                                  zones: zones, highlightZone: highlight)
+    }
+
+    // MARK: Walking guide
+
+    @MainActor
+    func setWalkMode(_ mode: WalkMode) {
+        walkMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: "greensight.walkMode")
+        regenerateWalkPlan()
+    }
+
+    /// Marks the cup at the crosshair. The across-the-green route then keeps out of its surround.
+    @MainActor
+    func markCup() {
+        guard phase == .scanning || phase == .edge, let view = arView else { return }
+        let centre = CGPoint(x: view.bounds.midX, y: view.bounds.midY)
+        guard let position = raycast(centre, in: view) else {
+            coachMessage = "No surface found at the crosshair. Aim at the cup and try again."
+            return
+        }
+        cupWorld = position
+        cupLocal = SIMD2<Float>(position.x - origin.x, position.z - origin.z)
+        renderer?.showCup(position, keepOutRadius: WalkPlanner.cupKeepOut)
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        regenerateWalkPlan()
+    }
+
+    @MainActor
+    func clearCup() {
+        cupWorld = nil
+        cupLocal = nil
+        renderer?.showCup(nil, keepOutRadius: WalkPlanner.cupKeepOut)
+        regenerateWalkPlan()
+    }
+
+    @MainActor
+    func regenerateWalkPlan() {
+        guard phase == .scanning || phase == .review else {
+            walkPlan = .empty
+            return
+        }
+        walkPlan = WalkPlanner.plan(mode: walkMode, polygon: localPolygon(), cup: cupLocal, start: userPosition)
+        walkIndex = 0
+        refreshWalkRender()
+        republishMinimapOverlay()
+        updateWalkGuidance()
+    }
+
+    /// Ground height under a map-local point, interpolated from the edge points (which were placed on the ground).
+    private func groundY(atLocal p: SIMD2<Float>) -> Float {
+        guard !edgeWorld.isEmpty else { return origin.y }
+        var weighted: Float = 0, total: Float = 0
+        for point in edgeWorld {
+            let d = max(simd_distance(SIMD2<Float>(point.x - origin.x, point.z - origin.z), p), 0.25)
+            let w = 1 / (d * d)
+            weighted += point.y * w
+            total += w
+        }
+        return weighted / total
+    }
+
+    @MainActor
+    private func refreshWalkRender() {
+        guard walkPlan.mode != .off, walkIndex < walkPlan.waypoints.count else {
+            renderer?.clearWalkRoute()
+            return
+        }
+        let world = walkPlan.waypoints[walkIndex...].map { local in
+            SIMD3<Float>(local.x + origin.x, groundY(atLocal: local) + 0.03, local.y + origin.z)
+        }
+        renderer?.showWalkRoute(world)
+    }
+
+    @MainActor
+    private func republishMinimapOverlay() {
+        guard !minimap.polygon.isEmpty else { return }
+        minimapVersion += 1
+        var snapshot = minimap
+        snapshot.version = minimapVersion
+        snapshot.walkPath = walkPlan.path
+        snapshot.cup = cupLocal
+        minimap = snapshot
+    }
+
+    @MainActor
+    private func updateWalkProgress() {
+        guard walkPlan.mode != .off, phase == .scanning, let user = userPosition, !walkPlan.waypoints.isEmpty else { return }
+        let waypoints = walkPlan.waypoints
+        var advanced = false
+        // Reaching any of the next few waypoints counts, so cutting a corner does not stall the guide.
+        var lookahead = min(walkIndex + 4, waypoints.count)
+        var index = walkIndex
+        while index < lookahead {
+            if simd_distance(user, waypoints[index]) < 1.2 {
+                walkIndex = index + 1
+                advanced = true
+                lookahead = min(walkIndex + 4, waypoints.count)
+            }
+            index += 1
+        }
+        if advanced { refreshWalkRender() }
+        updateWalkGuidance()
+    }
+
+    @MainActor
+    private func updateWalkGuidance() {
+        guard walkPlan.mode != .off else { walkGuidance = nil; return }
+        guard walkIndex < walkPlan.waypoints.count else {
+            walkGuidance = "Route finished. Check the map for gaps, then tap Finish."
+            return
+        }
+        guard let user = userPosition else {
+            walkGuidance = "Walk to the cyan marker to start the route."
+            return
+        }
+        let target = walkPlan.waypoints[walkIndex]
+        let distance = simd_distance(user, target)
+        let remaining = walkPlan.waypoints[walkIndex...].reduce((Float(0), user)) { ($0.0 + simd_distance($0.1, $1), $1) }.0
+        let text = String(format: "Next marker %.0f m ahead · about %.0f m left", distance, remaining)
+        walkGuidance = distance > 5 && walkIndex > 0 ? "Off the route. " + text : text
     }
 
     @MainActor

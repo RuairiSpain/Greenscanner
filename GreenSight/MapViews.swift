@@ -181,6 +181,7 @@ struct GreenDetailView: View {
                     LabeledContent("Zones", value: "\(zones)" + ((record.unlinkedZones ?? 0) > 0 ? " (\(record.unlinkedZones ?? 0) unlinked)" : ""))
                 }
                 LabeledContent("Tracking losses", value: "\(record.trackingLossCount)")
+                LabeledContent("Cup marked", value: record.cup == nil ? "No" : "Yes")
                 LabeledContent("Cells", value: "\(record.cells.count)")
                 LabeledContent("North-aligned", value: record.headingAligned ? "Yes" : "No")
                 if let count = record.sourceScanCount {
@@ -327,6 +328,12 @@ struct MapSlopeView: View {
                 }
                 outline.closeSubpath()
                 context.stroke(outline, with: .color(.white), lineWidth: 2)
+                if let cup = record.cup {
+                    let p = point(cup.x, cup.z)
+                    context.stroke(Path(ellipseIn: CGRect(x: p.x - 7, y: p.y - 7, width: 14, height: 14)),
+                                   with: .color(.white), lineWidth: 2)
+                    context.fill(Path(ellipseIn: CGRect(x: p.x - 2.5, y: p.y - 2.5, width: 5, height: 5)), with: .color(.white))
+                }
             }
             .frame(height: 320)
             .background(.black.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
@@ -381,6 +388,22 @@ struct MiniMapCells: View, Equatable {
             if snapshot.closed { outline.closeSubpath() }
             context.stroke(outline, with: .color(.white), lineWidth: 1.5)
 
+            if snapshot.walkPath.count >= 2 {
+                var route = Path()
+                for (index, vertex) in snapshot.walkPath.enumerated() {
+                    let p = transform.point(vertex.x, vertex.y)
+                    if index == 0 { route.move(to: p) } else { route.addLine(to: p) }
+                }
+                context.stroke(route, with: .color(.cyan.opacity(0.7)), style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
+            }
+            if let cup = snapshot.cup {
+                let p = transform.point(cup.x, cup.y)
+                let radius = CGFloat(WalkPlanner.cupKeepOut) * transform.scale
+                context.fill(Path(ellipseIn: CGRect(x: p.x - radius, y: p.y - radius, width: radius * 2, height: radius * 2)),
+                             with: .color(.red.opacity(0.3)))
+                context.fill(Path(ellipseIn: CGRect(x: p.x - 2.5, y: p.y - 2.5, width: 5, height: 5)), with: .color(.white))
+            }
+
             // Zone markers: ring colour shows progress, red means the zone is not tied to the rest of the scan.
             if snapshot.zones.count > 1 {
                 for zone in snapshot.zones {
@@ -406,10 +429,20 @@ struct MiniMapCells: View, Equatable {
 struct MiniMapUser: View {
     let snapshot: MiniMapSnapshot
     let user: SIMD2<Float>?
+    var walkedWaypoints: [SIMD2<Float>] = []
 
     var body: some View {
         Canvas { context, size in
-            guard let user, let transform = MiniMapTransform(polygon: snapshot.polygon, size: size) else { return }
+            guard let transform = MiniMapTransform(polygon: snapshot.polygon, size: size) else { return }
+            if walkedWaypoints.count >= 2 {
+                var done = Path()
+                for (index, vertex) in walkedWaypoints.enumerated() {
+                    let p = transform.point(vertex.x, vertex.y)
+                    if index == 0 { done.move(to: p) } else { done.addLine(to: p) }
+                }
+                context.stroke(done, with: .color(.white.opacity(0.9)), lineWidth: 2)
+            }
+            guard let user else { return }
             let p = transform.point(user.x, user.y)
             context.fill(Path(ellipseIn: CGRect(x: p.x - 4, y: p.y - 4, width: 8, height: 8)), with: .color(.cyan))
         }
@@ -419,11 +452,12 @@ struct MiniMapUser: View {
 struct MiniMapView: View {
     let snapshot: MiniMapSnapshot
     let user: SIMD2<Float>?
+    var walkedWaypoints: [SIMD2<Float>] = []
 
     var body: some View {
         ZStack {
             MiniMapCells(snapshot: snapshot).equatable()
-            MiniMapUser(snapshot: snapshot, user: user)
+            MiniMapUser(snapshot: snapshot, user: user, walkedWaypoints: walkedWaypoints)
         }
         .frame(width: 150, height: 150)
         .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
@@ -480,7 +514,8 @@ struct MapScanScreen: View {
                 Spacer()
                 HStack(alignment: .bottom) {
                     if !model.minimap.polygon.isEmpty {
-                        MiniMapView(snapshot: model.minimap, user: model.userPosition)
+                        MiniMapView(snapshot: model.minimap, user: model.userPosition,
+                                    walkedWaypoints: Array(model.walkPlan.waypoints.prefix(model.walkIndex)))
                     }
                     Spacer()
                 }
@@ -583,6 +618,7 @@ struct MapScanScreen: View {
                           systemImage: "exclamationmark.triangle.fill")
                         .font(.caption).foregroundStyle((model.residualMillimetres ?? drift) > 8 ? Color.orange : Color.secondary)
                 }
+                walkGuideControls
                 if model.trackingLossCount > 0 {
                     Label("Tracking lost \(model.trackingLossCount) time(s). Revisit those areas.",
                           systemImage: "exclamationmark.triangle.fill")
@@ -602,6 +638,34 @@ struct MapScanScreen: View {
         .padding(16)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))
         .opacity(model.phase == .review ? 0 : 1)
+    }
+
+    @ViewBuilder
+    private var walkGuideControls: some View {
+        Picker("Walk guide", selection: Binding(get: { model.walkMode }, set: { model.setWalkMode($0) })) {
+            ForEach(WalkMode.allCases) { Text($0.label).tag($0) }
+        }
+        .pickerStyle(.segmented)
+        if model.walkMode != .off {
+            if let guidance = model.walkGuidance {
+                Label(guidance, systemImage: "figure.walk").font(.caption.weight(.semibold))
+            }
+            if model.walkMode == .fringeOnly, model.walkPlan.mode == .fringeOnly {
+                Text("Stays about 1 m outside the edge, off the putting surface. From there about \((model.walkPlan.reachableFraction).formatted(.percent.precision(.fractionLength(0)))) of the green is in reach; the middle will be missing.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            } else if model.walkPlan.mode == .acrossGreen {
+                Text("About \(Int(model.walkPlan.lengthMetres)) m of walking in lanes. Stay clear of the red area around the cup, and never walk another player's line.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                HStack {
+                    if model.cupLocal == nil {
+                        Button("Mark cup at +") { model.markCup() }.buttonStyle(.bordered)
+                    } else {
+                        Button("Clear cup") { model.clearCup() }.buttonStyle(.bordered)
+                    }
+                }
+                .font(.caption)
+            }
+        }
     }
 
     private var reviewOverlay: some View {

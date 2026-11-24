@@ -79,6 +79,8 @@ struct GreenMapRecord: Codable, Identifiable, Sendable {
     /// Capture settings, kept so scans made with different depth sources or devices can be compared.
     var depthSource: String? = nil
     var deviceModel: String? = nil
+    /// Cup position if the user marked it, in the same frame as the outline.
+    var cup: EdgePoint? = nil
 
     var edgeVector: [SIMD2<Float>] { edge.map(\.vector) }
 }
@@ -111,6 +113,8 @@ struct MiniMapSnapshot: Equatable, Sendable {
     var good: [SIMD2<Float>] = []
     var weak: [SIMD2<Float>] = []
     var noisy: [SIMD2<Float>] = []
+    var walkPath: [SIMD2<Float>] = []
+    var cup: SIMD2<Float>?
     var zones: [ZoneStatus] = []
     var highlightZone: Int?
     var cellSize: Float = GreenMapAccumulator.cellSize

@@ -259,6 +259,58 @@ final class GreenSightTests: XCTestCase {
         XCTAssertEqual(decoded.edge.count, 4)
     }
 
+    // MARK: Walking guide
+
+    private let wideGreen: [SIMD2<Float>] = [SIMD2(0, 0), SIMD2(14, 0), SIMD2(14, 6), SIMD2(0, 6)]
+
+    func testAcrossRouteCoversGreenInLanes() {
+        let plan = WalkPlanner.plan(mode: .acrossGreen, polygon: wideGreen, cup: nil, start: nil)
+        XCTAssertEqual(plan.mode, .acrossGreen)
+        XCTAssertGreaterThanOrEqual(plan.reachableFraction, 0.95)
+        // Two lanes about 13 m long plus the connection between them.
+        XCTAssertEqual(plan.lengthMetres, 29.4, accuracy: 3)
+        for point in plan.path { XCTAssertTrue(GreenGeometry.contains(wideGreen, point: point)) }
+        XCTAssertLessThanOrEqual(zip(plan.waypoints, plan.waypoints.dropFirst()).map { simd_distance($0, $1) }.max() ?? 0,
+                                 WalkPlanner.waypointSpacing + 0.01)
+    }
+
+    func testRouteStartsNearestTheWalker() {
+        let plan = WalkPlanner.plan(mode: .acrossGreen, polygon: wideGreen, cup: nil, start: SIMD2<Float>(13.5, 5.5))
+        XCTAssertLessThan(simd_distance(plan.path[0], SIMD2<Float>(13.5, 5.5)), 2)
+    }
+
+    func testRouteKeepsOutOfCupSurround() {
+        let cup = SIMD2<Float>(7, 1.5)
+        let plan = WalkPlanner.plan(mode: .acrossGreen, polygon: wideGreen, cup: cup, start: nil)
+        for point in WalkPlanner.resample(plan.path, spacing: 0.25) {
+            XCTAssertGreaterThanOrEqual(simd_distance(point, cup), WalkPlanner.cupKeepOut - 0.05)
+        }
+        XCTAssertGreaterThanOrEqual(plan.reachableFraction, 0.9)
+    }
+
+    func testFringeRouteStaysOffTheGreen() {
+        let big: [SIMD2<Float>] = [SIMD2(0, 0), SIMD2(14, 0), SIMD2(14, 10), SIMD2(0, 10)]
+        let plan = WalkPlanner.plan(mode: .fringeOnly, polygon: big, cup: nil, start: nil)
+        XCTAssertEqual(plan.mode, .fringeOnly)
+        XCTAssertGreaterThan(plan.path.count, 4)
+        for point in plan.path { XCTAssertFalse(GreenGeometry.contains(big, point: point)) }
+        // A path about 1 m outside a 14 x 10 m green reaches the outer band only.
+        XCTAssertGreaterThan(plan.reachableFraction, 0.4)
+        XCTAssertLessThan(plan.reachableFraction, 0.8)
+        XCTAssertEqual(plan.path.first, plan.path.last)
+    }
+
+    func testWalkModeOffGivesEmptyPlan() {
+        XCTAssertTrue(WalkPlanner.plan(mode: .off, polygon: wideGreen, cup: nil, start: nil).path.isEmpty)
+    }
+
+    func testResampleKeepsCornersAndSpacing() {
+        let path: [SIMD2<Float>] = [SIMD2(0, 0), SIMD2(5, 0), SIMD2(5, 3)]
+        let out = WalkPlanner.resample(path, spacing: 2)
+        XCTAssertTrue(out.contains(SIMD2<Float>(5, 0)))
+        XCTAssertEqual(out.last, SIMD2<Float>(5, 3))
+    }
+
     // MARK: Resumable scans
 
     func testAccumulatorSnapshotRestoresScan() throws {
