@@ -35,6 +35,10 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
     @Published var maxCorrectionMillimetres: Double?
     @Published var zoneGuidance = "Walk the inside and cover the grey areas on the map."
     @Published var zones: [ZoneStatus] = []
+    @Published var coachMessage: String?
+    @Published var depthSource: DepthSource {
+        didSet { UserDefaults.standard.set(depthSource.rawValue, forKey: "greensight.depthSource") }
+    }
     @Published var trackingLossCount = 0
     @Published var minimap: MiniMapSnapshot = .empty
     @Published var userPosition: SIMD2<Float>?
@@ -60,8 +64,11 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
     private var minimapVersion = 0
     private var scenePhaseActive = true
     private var sessionPausedByUs = false
+    private var coach = MotionCoach()
+    private var lastCoachHaptic: TimeInterval = 0
 
     override init() {
+        depthSource = DepthSource(rawValue: UserDefaults.standard.string(forKey: "greensight.depthSource") ?? "") ?? .raw
         super.init()
         location.onFirstFix = { [weak self] in
             DispatchQueue.main.async { self?.objectWillChange.send() }
@@ -201,6 +208,8 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
         residualMillimetres = nil
         maxCorrectionMillimetres = nil
         zones = []
+        coachMessage = nil
+        coach.reset()
         zoneGuidance = "Walk the inside and cover the grey areas on the map."
         trackingLossCount = 0
         minimap = .empty
@@ -228,6 +237,9 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
 
         let configuration = ARWorldTrackingConfiguration()
         configuration.frameSemantics.insert(.sceneDepth)
+        if depthSource == .smoothed, ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
+            configuration.frameSemantics.insert(.smoothedSceneDepth)
+        }
         configuration.planeDetection = [.horizontal]
         configuration.environmentTexturing = .none
         // Heading alignment puts +x east and +z south, which lets separate scans of one green be aligned later.
@@ -265,6 +277,9 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
             sessionPausedByUs = false
             let configuration = ARWorldTrackingConfiguration()
             configuration.frameSemantics.insert(.sceneDepth)
+            if depthSource == .smoothed, ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
+                configuration.frameSemantics.insert(.smoothedSceneDepth)
+            }
             configuration.worldAlignment = headingAligned ? .gravityAndHeading : .gravity
             view.session.run(configuration)
             if phase != .review { registerTrackingLoss() }
@@ -358,6 +373,7 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
         let name = courseName, hole = holeNumber
         let losses = trackingLossCount
         let aligned = headingAligned
+        let depthSourceName = depthSource.rawValue
         let coordinate = originCoordinate
         let currentScan = scanID
         processingQueue.async { [weak self] in
@@ -374,7 +390,8 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
                 isPartial: summary.coverage < 0.85, headingAligned: aligned,
                 originLatitude: coordinate?.latitude, originLongitude: coordinate?.longitude,
                 zoneCount: summary.zones.count, residualMillimetres: summary.residualMillimetres,
-                maxCorrectionMillimetres: summary.maxCorrectionMillimetres, unlinkedZones: summary.unlinkedZones)
+                maxCorrectionMillimetres: summary.maxCorrectionMillimetres, unlinkedZones: summary.unlinkedZones,
+                depthSource: depthSourceName, deviceModel: DeviceInfo.machine)
             DispatchQueue.main.async {
                 guard let self, self.scanID == currentScan, self.phase == .review else { return }
                 self.reviewRecord = record
@@ -473,26 +490,28 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
             }
             addEdgePoint(position)
         case .scanning:
+            updateCoach(frame: frame)
             guard n.isMultiple(of: 3), !depthInFlight else { return }
             let id = scanID
             let timestamp = frame.timestamp
             let wantPublish = timestamp - lastPublish >= 1.0
             let accumulator = self.accumulator
+            let smoothed = depthSource == .smoothed
             depthInFlight = true
             processingQueue.async { [weak self] in
-                let output: (GreenMapAccumulator.Summary, [MapTile], [MapTile])? = autoreleasepool {
-                    let samples = DepthProjector.project(frame: frame, stride: 3)
+                let output: (GreenMapAccumulator.Summary, [MapTile], [MapTile], [MapTile])? = autoreleasepool {
+                    let samples = DepthProjector.project(frame: frame, stride: 3, smoothed: smoothed)
                     accumulator.ingest(samples, camera: camera, timestamp: timestamp, scanID: id)
                     guard wantPublish else { return nil }
                     let tiles = accumulator.tiles()
-                    return (accumulator.summary(), tiles.good, tiles.weak)
+                    return (accumulator.summary(), tiles.good, tiles.weak, tiles.noisy)
                 }
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.depthInFlight = false
                     guard self.scanID == id, self.phase == .scanning, let output else { return }
                     self.lastPublish = timestamp
-                    self.apply(summary: output.0, good: output.1, weak: output.2)
+                    self.apply(summary: output.0, good: output.1, weak: output.2, noisy: output.3)
                 }
             }
         case .review:
@@ -501,7 +520,19 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     @MainActor
-    private func apply(summary: GreenMapAccumulator.Summary, good: [MapTile], weak: [MapTile]) {
+    private func updateCoach(frame: ARFrame) {
+        let advice = coach.update(transform: frame.camera.transform, timestamp: frame.timestamp)
+        let message = advice?.message
+        guard message != coachMessage else { return }
+        coachMessage = message
+        if message != nil, frame.timestamp - lastCoachHaptic > 5 {
+            lastCoachHaptic = frame.timestamp
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        }
+    }
+
+    @MainActor
+    private func apply(summary: GreenMapAccumulator.Summary, good: [MapTile], weak: [MapTile], noisy: [MapTile]) {
         coverage = summary.coverage
         driftMillimetres = summary.driftMillimetres
         residualMillimetres = summary.residualMillimetres
@@ -512,18 +543,18 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
         quality = MapQuality.score(coverage: summary.coverage, goodShare: summary.goodShare,
                                    driftMillimetres: summary.residualMillimetres ?? summary.driftMillimetres,
                                    trackingLosses: trackingLossCount, unlinkedZones: summary.unlinkedZones)
-        renderer?.showCoverage(good: good, weak: weak, origin: origin)
+        renderer?.showCoverage(good: good, weak: weak, noisy: noisy, origin: origin)
         publishMinimap(polygon: localPolygon(), closed: true,
                        good: good.map { SIMD2<Float>($0.x, $0.z) }, weak: weak.map { SIMD2<Float>($0.x, $0.z) },
-                       zones: summary.zones, highlight: guidance.highlight)
+                       noisy: noisy.map { SIMD2<Float>($0.x, $0.z) }, zones: summary.zones, highlight: guidance.highlight)
     }
 
     @MainActor
     private func publishMinimap(polygon: [SIMD2<Float>], closed: Bool, good: [SIMD2<Float>], weak: [SIMD2<Float>],
-                                zones: [ZoneStatus] = [], highlight: Int? = nil) {
+                                noisy: [SIMD2<Float>] = [], zones: [ZoneStatus] = [], highlight: Int? = nil) {
         minimapVersion += 1
         minimap = MiniMapSnapshot(version: minimapVersion, polygon: polygon, closed: closed, good: good, weak: weak,
-                                  zones: zones, highlightZone: highlight)
+                                  noisy: noisy, zones: zones, highlightZone: highlight)
     }
 
     @MainActor

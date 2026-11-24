@@ -332,11 +332,14 @@ enum GreenMerger {
         var weight: Float
         var observations: Int
         var range: Float
+        var noise: Float?
     }
 
     private static func weight(_ cell: MapCell, quality: Double) -> Float {
         let range = max(1, cell.bestRange)
-        return Float(max(quality, 0.05)) * Float(min(cell.observations, 20)) / (range * range)
+        // Noisy cells count for less: weight falls to half at 8 mm of frame-to-frame noise.
+        let steadiness = cell.noise.map { 1 / (1 + ($0 / 0.008) * ($0 / 0.008)) } ?? 1
+        return Float(max(quality, 0.05)) * Float(min(cell.observations, 20)) / (range * range) * max(steadiness, 0.1)
     }
 
     static func merge(_ records: [GreenMapRecord]) throws -> MergeResult {
@@ -353,7 +356,7 @@ enum GreenMerger {
             referenceHeights[key] = cell.height
             contributions[key, default: []].append(Contribution(
                 height: cell.height, weight: weight(cell, quality: reference.qualityScore),
-                observations: cell.observations, range: cell.bestRange))
+                observations: cell.observations, range: cell.bestRange, noise: cell.noise))
         }
 
         var polygons = [referencePolygon]
@@ -379,7 +382,8 @@ enum GreenMerger {
 
             // Re-bin the other scan's cells onto the reference grid.
             struct Bin { var sumW: Float = 0; var sumWH: Float = 0; var sumX: Float = 0; var sumZ: Float = 0
-                         var obs = 0; var range = Float.greatestFiniteMagnitude }
+                         var obs = 0; var range = Float.greatestFiniteMagnitude
+                         var sumNoise: Float = 0; var noiseW: Float = 0 }
             var bins: [SIMD2<Int32>: Bin] = [:]
             for cell in other.cells {
                 let centre = SIMD2<Float>((Float(cell.ix) + 0.5) * size, (Float(cell.iz) + 0.5) * size)
@@ -387,6 +391,7 @@ enum GreenMerger {
                 let key = SIMD2<Int32>(Int32(floor(p.x / size)), Int32(floor(p.y / size)))
                 let w = weight(cell, quality: other.qualityScore)
                 var bin = bins[key] ?? Bin()
+                bin.sumNoise += w * (cell.noise ?? 0) * (cell.noise ?? 0); bin.noiseW += cell.noise == nil ? 0 : w
                 bin.sumW += w; bin.sumWH += w * cell.height
                 bin.sumX += w * p.x; bin.sumZ += w * p.y
                 bin.obs += cell.observations
@@ -439,7 +444,8 @@ enum GreenMerger {
                 let x = Double(bin.sumX / bin.sumW), z = Double(bin.sumZ / bin.sumW)
                 let corrected = Float(Double(bin.sumWH / bin.sumW) + offset + tiltX * (x - centreX) + tiltZ * (z - centreZ))
                 contributions[key, default: []].append(Contribution(
-                    height: corrected, weight: bin.sumW, observations: bin.obs, range: bin.range))
+                    height: corrected, weight: bin.sumW, observations: bin.obs, range: bin.range,
+                    noise: bin.noiseW > 0 ? (bin.sumNoise / bin.noiseW).squareRoot() : nil))
                 if let reference = referenceHeights[key] { afterCorrection.append(abs(reference - corrected)) }
             }
             residuals.append(median(afterCorrection))
@@ -464,9 +470,13 @@ enum GreenMerger {
             let totalWeight = chosen.reduce(Float(0)) { $0 + $1.weight }
             guard totalWeight > 0 else { continue }
             let height = chosen.reduce(Float(0)) { $0 + $1.height * $1.weight } / totalWeight
+            let noisy = chosen.filter { $0.noise != nil }
+            let noiseWeight = noisy.reduce(Float(0)) { $0 + $1.weight }
+            let mergedNoise: Float? = noiseWeight > 0
+                ? (noisy.reduce(Float(0)) { $0 + $1.weight * ($1.noise ?? 0) * ($1.noise ?? 0) } / noiseWeight).squareRoot() : nil
             cells.append(MapCell(ix: Int(key.x), iz: Int(key.y), height: height,
                                  observations: min(200, chosen.reduce(0) { $0 + $1.observations }),
-                                 bestRange: chosen.map(\.range).min() ?? 0))
+                                 bestRange: chosen.map(\.range).min() ?? 0, noise: mergedNoise))
         }
         cells.sort { ($0.iz, $0.ix) < ($1.iz, $1.ix) }
 

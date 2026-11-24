@@ -10,10 +10,12 @@ struct MapCell: Codable, Sendable {
     let observations: Int
     /// Closest camera distance, in metres, at which this cell was observed.
     let bestRange: Float
+    /// Standard deviation, in metres, of this cell's height between frames of the same pass.
+    let noise: Float?
 
-    init(ix: Int, iz: Int, height: Float, observations: Int, bestRange: Float) {
+    init(ix: Int, iz: Int, height: Float, observations: Int, bestRange: Float, noise: Float? = nil) {
         self.ix = ix; self.iz = iz; self.height = height
-        self.observations = observations; self.bestRange = bestRange
+        self.observations = observations; self.bestRange = bestRange; self.noise = noise
     }
 
     init(from decoder: Decoder) throws {
@@ -23,6 +25,7 @@ struct MapCell: Codable, Sendable {
         height = try container.decode(Float.self)
         observations = try container.decode(Int.self)
         bestRange = try container.decode(Float.self)
+        noise = container.isAtEnd ? nil : try container.decode(Float.self)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -32,6 +35,7 @@ struct MapCell: Codable, Sendable {
         try container.encode(height)
         try container.encode(observations)
         try container.encode(bestRange)
+        if let noise { try container.encode(noise) }
     }
 }
 
@@ -72,8 +76,19 @@ struct GreenMapRecord: Codable, Identifiable, Sendable {
     var residualMillimetres: Double? = nil
     var maxCorrectionMillimetres: Double? = nil
     var unlinkedZones: Int? = nil
+    /// Capture settings, kept so scans made with different depth sources or devices can be compared.
+    var depthSource: String? = nil
+    var deviceModel: String? = nil
 
     var edgeVector: [SIMD2<Float>] { edge.map(\.vector) }
+}
+
+enum DepthSource: String, CaseIterable, Identifiable, Sendable {
+    case raw
+    case smoothed
+
+    var id: String { rawValue }
+    var label: String { self == .raw ? "Raw LiDAR depth" : "Smoothed depth (temporal filter)" }
 }
 
 enum MapPhase: Equatable {
@@ -95,6 +110,7 @@ struct MiniMapSnapshot: Equatable, Sendable {
     var closed = false
     var good: [SIMD2<Float>] = []
     var weak: [SIMD2<Float>] = []
+    var noisy: [SIMD2<Float>] = []
     var zones: [ZoneStatus] = []
     var highlightZone: Int?
     var cellSize: Float = GreenMapAccumulator.cellSize
@@ -123,6 +139,15 @@ enum MapQuality {
 enum MapSlope {
     /// Grade magnitude for every cell, using a 0.4 m baseline where possible to suppress depth noise.
     static func grades(cells: [MapCell], cellSize: Float) -> [Float] {
+        gradientVectors(cells: cells, cellSize: cellSize).map { vector in
+            guard let vector else { return 0 }
+            return (vector.x * vector.x + vector.y * vector.y).squareRoot()
+        }
+    }
+
+    /// Grade (rise over run) along x and z for every cell. An axis without neighbours counts as zero;
+    /// a cell with neither axis available returns nil.
+    static func gradientVectors(cells: [MapCell], cellSize: Float) -> [SIMD2<Float>?] {
         var lookup: [SIMD2<Int32>: Float] = [:]
         lookup.reserveCapacity(cells.count)
         for cell in cells { lookup[SIMD2<Int32>(Int32(cell.ix), Int32(cell.iz))] = cell.height }
@@ -139,9 +164,10 @@ enum MapSlope {
         }
 
         return cells.map { cell in
-            let gx = axisGrade(cell, dx: 1, dz: 0) ?? 0
-            let gz = axisGrade(cell, dx: 0, dz: 1) ?? 0
-            return (gx * gx + gz * gz).squareRoot()
+            let gx = axisGrade(cell, dx: 1, dz: 0)
+            let gz = axisGrade(cell, dx: 0, dz: 1)
+            if gx == nil && gz == nil { return nil }
+            return SIMD2<Float>(gx ?? 0, gz ?? 0)
         }
     }
 }

@@ -259,6 +259,153 @@ final class GreenSightTests: XCTestCase {
         XCTAssertEqual(decoded.edge.count, 4)
     }
 
+    // MARK: Scan quality
+
+    private func cameraPose(position: SIMD3<Float>, forward: SIMD3<Float>) -> simd_float4x4 {
+        let f = simd_normalize(forward)
+        let z = -f
+        var x = simd_cross(SIMD3<Float>(0, 1, 0), z)
+        if simd_length(x) < 1e-4 { x = SIMD3<Float>(1, 0, 0) }
+        x = simd_normalize(x)
+        let y = simd_cross(z, x)
+        return simd_float4x4(columns: (SIMD4<Float>(x, 0), SIMD4<Float>(y, 0), SIMD4<Float>(z, 0), SIMD4<Float>(position, 1)))
+    }
+
+    func testIncidenceWeightFavoursSteepViews() {
+        XCTAssertEqual(DepthProjector.incidenceWeight(rayY: -1), 1, accuracy: 1e-6)
+        XCTAssertGreaterThan(DepthProjector.incidenceWeight(rayY: -0.9), DepthProjector.incidenceWeight(rayY: -0.3))
+        XCTAssertEqual(DepthProjector.incidenceWeight(rayY: -0.01), 0.2, accuracy: 1e-6)
+    }
+
+    func testCoachStaysQuietWhenScanningWell() {
+        var coach = MotionCoach()
+        for frame in 0..<40 {
+            coach.update(transform: cameraPose(position: SIMD3<Float>(Float(frame) * 0.01, 1.5, 0),
+                                               forward: SIMD3<Float>(0, -0.6, -0.8)), timestamp: Double(frame) / 30)
+        }
+        XCTAssertNil(coach.advice)
+    }
+
+    func testCoachFlagsFastWalking() {
+        var coach = MotionCoach()
+        for frame in 0..<40 {
+            coach.update(transform: cameraPose(position: SIMD3<Float>(Float(frame) * 0.1, 1.5, 0),
+                                               forward: SIMD3<Float>(0, -0.6, -0.8)), timestamp: Double(frame) / 30)
+        }
+        XCTAssertEqual(coach.advice, .slowDown)
+    }
+
+    func testCoachFlagsFastTurningAndShallowTilt() {
+        var turning = MotionCoach()
+        for frame in 0..<40 {
+            let yaw = Float(frame) * 5 * .pi / 180
+            turning.update(transform: cameraPose(position: SIMD3<Float>(0, 1.5, 0),
+                                                 forward: SIMD3<Float>(sin(yaw), -0.6, -cos(yaw))), timestamp: Double(frame) / 30)
+        }
+        XCTAssertEqual(turning.advice, .turningTooFast)
+
+        var level = MotionCoach()
+        for frame in 0..<40 {
+            level.update(transform: cameraPose(position: SIMD3<Float>(0, 1.5, 0),
+                                               forward: SIMD3<Float>(0, -0.1, -1)), timestamp: Double(frame) / 30)
+        }
+        XCTAssertEqual(level.advice, .tiltDown)
+    }
+
+    func testSteadyCellsAreGoodAndJitteryCellsAreNoisy() {
+        let steady = GreenMapAccumulator()
+        let jittery = GreenMapAccumulator()
+        let id = UUID()
+        steady.configure(polygon: square, origin: .zero, scanID: id)
+        jittery.configure(polygon: square, origin: .zero, scanID: id)
+        for step in 0..<4 {
+            steady.ingest(flatSamples(), camera: SIMD3<Float>(2, 1.5, 2), timestamp: Double(step), scanID: id)
+            jittery.ingest(flatSamples(height: step.isMultiple(of: 2) ? 0.02 : -0.02),
+                           camera: SIMD3<Float>(2, 1.5, 2), timestamp: Double(step), scanID: id)
+        }
+        let steadySummary = steady.summary()
+        let jitterSummary = jittery.summary()
+        XCTAssertEqual(steadySummary.noisy, 0)
+        XCTAssertGreaterThan(steadySummary.good, 300)
+        XCTAssertGreaterThan(jitterSummary.noisy, 300)
+        XCTAssertEqual(jitterSummary.good, 0)
+        let noise = jittery.exportCells(smooth: false).first?.noise ?? 0
+        XCTAssertEqual(noise, 0.02, accuracy: 0.003)
+    }
+
+    private func noisyPlane(noise: Float) -> [MapCell] {
+        var cells: [MapCell] = []
+        for ix in 0..<30 {
+            for iz in 0..<30 {
+                let jitter = noise * Float(sin(Double(ix * 7 + iz * 13) * 12.9898) )
+                cells.append(MapCell(ix: ix, iz: iz, height: 0.02 * (Float(ix) + 0.5) * 0.2 + jitter,
+                                     observations: 10, bestRange: 1.5, noise: 0.003))
+            }
+        }
+        return cells
+    }
+
+    func testSmootherReducesNoiseAndKeepsSlope() {
+        let cells = noisyPlane(noise: 0.004)
+        let smoothed = SurfaceSmoother.smooth(cells: cells, cellSize: 0.2)
+        func rms(_ heights: [Float]) -> Float {
+            var sum: Float = 0
+            for (cell, h) in zip(cells, heights) {
+                let truth = 0.02 * (Float(cell.ix) + 0.5) * 0.2
+                sum += (h - truth) * (h - truth)
+            }
+            return (sum / Float(cells.count)).squareRoot()
+        }
+        XCTAssertLessThan(rms(smoothed), rms(cells.map(\.height)) * 0.6)
+        let grades = MapSlope.grades(cells: zip(cells, smoothed).map {
+            MapCell(ix: $0.ix, iz: $0.iz, height: $1, observations: 10, bestRange: 1.5)
+        }, cellSize: 0.2)
+        XCTAssertEqual(grades[15 * 30 + 15], 0.02, accuracy: 0.004)
+    }
+
+    func testSmootherRejectsIsolatedSpike() {
+        var cells: [MapCell] = []
+        for ix in 0..<15 {
+            for iz in 0..<15 {
+                let spike: Float = (ix == 7 && iz == 7) ? 0.05 : 0
+                cells.append(MapCell(ix: ix, iz: iz, height: spike, observations: 10, bestRange: 1.5))
+            }
+        }
+        let smoothed = SurfaceSmoother.smooth(cells: cells, cellSize: 0.2)
+        XCTAssertEqual(smoothed[7 * 15 + 7], 0, accuracy: 0.005)
+    }
+
+    func testCellNoiseRoundTripsAndOldFilesStillDecode() throws {
+        let cell = MapCell(ix: 1, iz: 2, height: 0.1, observations: 5, bestRange: 1.2, noise: 0.004)
+        let decoded = try JSONDecoder().decode(MapCell.self, from: JSONEncoder().encode(cell))
+        XCTAssertEqual(decoded.noise ?? 0, 0.004, accuracy: 1e-7)
+        let old = try JSONDecoder().decode(MapCell.self, from: Data("[1,2,0.1,5,1.2]".utf8))
+        XCTAssertNil(old.noise)
+        XCTAssertEqual(old.iz, 2)
+    }
+
+    private func recordFrom(cells: [MapCell]) -> GreenMapRecord {
+        GreenMapRecord(id: UUID(), courseName: "Validation", holeNumber: 1, createdAt: Date(), cellSize: 0.2,
+                       edge: square.map { EdgePoint(x: $0.x, z: $0.y) }, cells: cells, coverage: 1, qualityScore: 1,
+                       driftMillimetres: nil, trackingLossCount: 0, isPartial: false, headingAligned: false,
+                       originLatitude: nil, originLongitude: nil)
+    }
+
+    func testValidationRecoversKnownGradeAndReportsSlopeNoise() throws {
+        let report = try XCTUnwrap(ValidationReport.make(from: recordFrom(cells: noisyPlane(noise: 0.002)),
+                                                         expectedGradePercent: 2))
+        XCTAssertEqual(report.planeGradePercent, 2, accuracy: 0.15)
+        XCTAssertLessThan(abs(report.gradeErrorPercent ?? 99), 0.15)
+        XCTAssertLessThan(report.rmsResidualMillimetres, 4)
+        XCTAssertLessThan(report.localGradeErrorMedianPercent ?? 99, 1.5)
+        XCTAssertFalse(report.buckets.isEmpty)
+        XCTAssertTrue(report.json.contains("planeGradePercent"))
+    }
+
+    func testValidationReportRequiresEnoughCells() {
+        XCTAssertNil(ValidationReport.make(from: recordFrom(cells: Array(noisyPlane(noise: 0).prefix(10))), expectedGradePercent: 0))
+    }
+
     // MARK: Zones and height correction
 
     private func block(x: ClosedRange<Float>, z: ClosedRange<Float>, height: Float) -> [WorldSample] {

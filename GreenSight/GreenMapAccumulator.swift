@@ -27,6 +27,7 @@ final class GreenMapAccumulator: @unchecked Sendable {
         var epoch: Int32
         var sumWeight: Float
         var sumWeightedHeight: Float
+        var sumWeightedSquares: Double
         var count: Int32
     }
 
@@ -37,8 +38,11 @@ final class GreenMapAccumulator: @unchecked Sendable {
     }
 
     struct Summary: Sendable {
+        /// Covered cells by quality: observed close and steadily (good), observed from beyond `goodRange` (weak),
+        /// or with frame-to-frame height noise above `noisyThreshold` (noisy, needs a slower re-scan).
         let good: Int
         let weak: Int
+        let noisy: Int
         let total: Int
         /// Median spread of a cell's height between passes before correction, in millimetres.
         let driftMillimetres: Double?
@@ -46,14 +50,16 @@ final class GreenMapAccumulator: @unchecked Sendable {
         let residualMillimetres: Double?
         let maxCorrectionMillimetres: Double?
         let zones: [ZoneStatus]
-        var coverage: Double { Double(good + weak) / Double(max(total, 1)) }
-        var goodShare: Double { good + weak == 0 ? 0 : Double(good) / Double(good + weak) }
+        var coverage: Double { Double(good + weak + noisy) / Double(max(total, 1)) }
+        var goodShare: Double { good + weak + noisy == 0 ? 0 : Double(good) / Double(good + weak + noisy) }
         var unlinkedZones: Int { zones.filter { $0.state != .notStarted && !$0.linked }.count }
     }
 
     static let cellSize: Float = 0.2
     /// Observations from farther than this are flagged as weak (amber).
     static let goodRange: Float = 2.5
+    /// Frame-to-frame height standard deviation above this marks a cell as noisy.
+    static let noisyThreshold: Float = 0.008
     static let minimumObservations = 3
     static let zoneAreaSquareMetres: Float = 36
     static let minimumZoneCells = 15
@@ -262,6 +268,29 @@ final class GreenMapAccumulator: @unchecked Sendable {
         return weighted / max(weight, 0.001)
     }
 
+    /// Frame-to-frame height standard deviation within passes, in metres. Nil until a cell has enough frames.
+    private func noise(of cell: Cell) -> Float? {
+        guard cell.count >= Self.minimumObservations else { return nil }
+        var within = 0.0
+        var weight = 0.0
+        for entry in cell.entries {
+            let w = Double(entry.sumWeight)
+            guard w > 0 else { continue }
+            let mean = Double(entry.sumWeightedHeight) / w
+            within += max(0, entry.sumWeightedSquares - w * mean * mean)
+            weight += w
+        }
+        guard weight > 0 else { return nil }
+        return Float((within / weight).squareRoot())
+    }
+
+    private enum Quality { case good, weak, noisy }
+
+    private func quality(of cell: Cell) -> Quality {
+        if let noise = noise(of: cell), noise > Self.noisyThreshold { return .noisy }
+        return cell.minRange <= Self.goodRange ? .good : .weak
+    }
+
     // MARK: Ingest
 
     func ingest(_ samples: [WorldSample], camera: SIMD3<Float>, timestamp: Double, scanID: UUID) {
@@ -301,9 +330,11 @@ final class GreenMapAccumulator: @unchecked Sendable {
             if let index = cell.entries.firstIndex(where: { $0.epoch == epoch }) {
                 cell.entries[index].sumWeight += weight
                 cell.entries[index].sumWeightedHeight += height * weight
+                cell.entries[index].sumWeightedSquares += Double(weight) * Double(height) * Double(height)
                 cell.entries[index].count += 1
             } else {
-                cell.entries.append(Entry(epoch: epoch, sumWeight: weight, sumWeightedHeight: height * weight, count: 1))
+                cell.entries.append(Entry(epoch: epoch, sumWeight: weight, sumWeightedHeight: height * weight,
+                                          sumWeightedSquares: Double(weight) * Double(height) * Double(height), count: 1))
             }
             cell.count += 1
             cell.minRange = min(cell.minRange, range)
@@ -422,10 +453,14 @@ final class GreenMapAccumulator: @unchecked Sendable {
     func summary() -> Summary {
         lock.lock(); defer { lock.unlock() }
         refreshIfNeeded()
-        var good = 0, weak = 0
+        var good = 0, weak = 0, noisy = 0
         var covered = [Int](repeating: 0, count: zoneCentres.count)
         for (key, cell) in cells where cell.count >= Self.minimumObservations {
-            if cell.minRange <= Self.goodRange { good += 1 } else { weak += 1 }
+            switch quality(of: cell) {
+            case .good: good += 1
+            case .weak: weak += 1
+            case .noisy: noisy += 1
+            }
             if let zone = zoneOfCell[key], zone < covered.count { covered[zone] += 1 }
         }
         var zones: [ZoneStatus] = []
@@ -437,31 +472,42 @@ final class GreenMapAccumulator: @unchecked Sendable {
             zones.append(ZoneStatus(index: index, centre: zoneCentres[index], cellCount: total,
                                     coveredCount: covered[index], state: state, linked: linked))
         }
-        return Summary(good: good, weak: weak, total: totalInside, driftMillimetres: rawDrift,
+        return Summary(good: good, weak: weak, noisy: noisy, total: totalInside, driftMillimetres: rawDrift,
                        residualMillimetres: residualDrift, maxCorrectionMillimetres: maxCorrection, zones: zones)
     }
 
     /// Tile centres (local metres, drift-corrected heights) for rendering and the minimap.
-    func tiles() -> (good: [MapTile], weak: [MapTile]) {
+    func tiles() -> (good: [MapTile], weak: [MapTile], noisy: [MapTile]) {
         lock.lock(); defer { lock.unlock() }
         refreshIfNeeded()
         let size = Self.cellSize
-        var good: [MapTile] = [], weak: [MapTile] = []
+        var good: [MapTile] = [], weak: [MapTile] = [], noisy: [MapTile] = []
         for (key, cell) in cells where cell.count >= Self.minimumObservations {
             let tile = MapTile(x: (Float(key.x) + 0.5) * size, z: (Float(key.y) + 0.5) * size, y: correctedMean(cell))
-            if cell.minRange <= Self.goodRange { good.append(tile) } else { weak.append(tile) }
+            switch quality(of: cell) {
+            case .good: good.append(tile)
+            case .weak: weak.append(tile)
+            case .noisy: noisy.append(tile)
+            }
         }
-        return (good, weak)
+        return (good, weak, noisy)
     }
 
-    func exportCells() -> [MapCell] {
-        lock.lock(); defer { lock.unlock() }
+    /// Final cells with drift-corrected heights. With `smooth`, a robust local fit then removes cell-to-cell noise.
+    func exportCells(smooth: Bool = true) -> [MapCell] {
+        lock.lock()
         refreshIfNeeded()
-        return cells.compactMap { key, cell in
+        let raw: [MapCell] = cells.compactMap { key, cell in
             guard cell.count >= Self.minimumObservations else { return nil }
             return MapCell(ix: Int(key.x), iz: Int(key.y), height: correctedMean(cell),
-                           observations: cell.count, bestRange: cell.minRange)
+                           observations: cell.count, bestRange: cell.minRange, noise: noise(of: cell))
         }.sorted { ($0.iz, $0.ix) < ($1.iz, $1.ix) }
+        lock.unlock()
+        guard smooth else { return raw }
+        let heights = SurfaceSmoother.smooth(cells: raw, cellSize: Self.cellSize)
+        return zip(raw, heights).map {
+            MapCell(ix: $0.ix, iz: $0.iz, height: $1, observations: $0.observations, bestRange: $0.bestRange, noise: $0.noise)
+        }
     }
 }
 

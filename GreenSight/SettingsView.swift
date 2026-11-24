@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var mapModel: MapModel
 
     var body: some View {
         NavigationStack {
@@ -30,6 +31,15 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                Section {
+                    Picker("Depth source", selection: $mapModel.depthSource) {
+                        ForEach(DepthSource.allCases) { Text($0.label).tag($0) }
+                    }
+                } header: {
+                    Text("Map a Green")
+                } footer: {
+                    Text("Smoothed depth is filtered over time and may be quieter but lag behind movement. The choice is saved with each scan so you can compare them in the validation report.")
+                }
                 Section("Measurement limits") {
                     Label("Requires an iPhone or iPad exposing ARKit scene depth.", systemImage: "sensor.tag.radiowaves.forward")
                     Label("Rejects limited-tracking and low-confidence depth samples.", systemImage: "checkmark.shield")
@@ -42,7 +52,7 @@ struct SettingsView: View {
                     Text("Camera and depth frames are processed on-device. Saved reads contain reconstructed surface cells and calculated paths—not photos or video.")
                 }
                 Section("About") {
-                    LabeledContent("Version", value: "1.5 (6)")
+                    LabeledContent("Version", value: "1.6 (7)")
                     LabeledContent("Grid", value: "30 mm")
                     LabeledContent("Physics", value: "Rolling sphere + Stimp drag")
                 }

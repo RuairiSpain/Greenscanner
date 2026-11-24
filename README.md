@@ -151,3 +151,14 @@ Once the outline is closed, the green is split into compact zones of about 6 m (
 Scan data is grouped into epochs: a new epoch begins when the camera enters another zone, after 40 s, or after a tracking loss or session resume. Cells seen in more than one epoch tie those epochs together, and a least-squares solve estimates one vertical offset per epoch (the first epoch is the reference). Offsets are applied to the saved heights and to the AR overlay. Epochs that share fewer than 8 cells cannot be corrected, and their zone is flagged red ("not linked") with a prompt to walk across the boundary. The record stores the spread between passes before and after correction, the largest correction and the number of unlinked zones, and unlinked zones lower the quality score.
 
 Limits: only a vertical offset per epoch is corrected, not tilt or horizontal drift, and a horizontal jump after tracking loss is not repaired.
+
+### Scan quality (v1.6)
+
+- **Validation.** A saved green's detail page has a Validation section. Mark the scan as a known-grade surface (a level floor is 0%, or a board set to a measured grade) to see the fitted plane grade, the grade error, height scatter, local slope noise (median and 95th percentile) and residuals by camera range. The report can be shared as JSON, and `Scripts/analyze_green.py` produces the same statistics offline from an exported green. Depth source and device model are saved with each scan so runs can be compared. No accuracy figures have been measured yet.
+- **Weighting.** Each depth pixel is weighted by LiDAR confidence, range, and viewing angle (grazing views count for less).
+- **Depth source.** Settings can switch Map a Green between raw and ARKit smoothed scene depth.
+- **Noise feedback.** Cells whose height varies more than 8 mm between frames are marked red ("Noisy") in AR and on the minimap, separate from amber cells that were only seen from beyond 2.5 m. Noisy cells count for less in merges.
+- **Surface fit.** Saved heights go through a robust local plane fit (0.6 m radius, bisquare weights) that removes cell-to-cell noise and isolated spikes while keeping slope.
+- **Coaching.** While scanning, the app warns when the phone is carried faster than 1.2 m/s, turned faster than 70 degrees per second, or held within 20 degrees of level.
+
+The thresholds above are estimates to be tuned from validation scans.

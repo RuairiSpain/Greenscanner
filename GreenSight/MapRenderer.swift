@@ -11,11 +11,13 @@ final class MapRenderer {
     private var edgeEntities: [Entity] = []
     private var goodEntity: ModelEntity?
     private var weakEntity: ModelEntity?
+    private var noisyEntity: ModelEntity?
 
     private let edgeMaterial = SimpleMaterial(color: .white, isMetallic: false)
     private let pointMaterial = SimpleMaterial(color: .systemMint, isMetallic: false)
     private let goodMaterial = SimpleMaterial(color: UIColor.systemGreen.withAlphaComponent(0.55), isMetallic: false)
     private let weakMaterial = SimpleMaterial(color: UIColor.systemOrange.withAlphaComponent(0.55), isMetallic: false)
+    private let noisyMaterial = SimpleMaterial(color: UIColor.systemRed.withAlphaComponent(0.6), isMetallic: false)
 
     init(view: ARView) {
         self.view = view
@@ -30,6 +32,7 @@ final class MapRenderer {
         edgeEntities.removeAll()
         goodEntity = nil
         weakEntity = nil
+        noisyEntity = nil
         view = nil
     }
 
@@ -65,9 +68,10 @@ final class MapRenderer {
     }
 
     /// Replaces the coverage overlay. Tiles are in map-local metres; `origin` converts them to world space.
-    func showCoverage(good: [MapTile], weak: [MapTile], origin: SIMD3<Float>) {
+    func showCoverage(good: [MapTile], weak: [MapTile], noisy: [MapTile], origin: SIMD3<Float>) {
         goodEntity = update(goodEntity, tiles: good, origin: origin, material: goodMaterial)
         weakEntity = update(weakEntity, tiles: weak, origin: origin, material: weakMaterial)
+        noisyEntity = update(noisyEntity, tiles: noisy, origin: origin, material: noisyMaterial)
     }
 
     private func update(_ entity: ModelEntity?, tiles: [MapTile], origin: SIMD3<Float>,

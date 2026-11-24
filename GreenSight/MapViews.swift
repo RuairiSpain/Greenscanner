@@ -157,6 +157,7 @@ struct GreenDetailView: View {
                     LabeledContent("Merged from", value: "\(count) scans")
                 }
             }
+            ValidationSection(record: record)
             if let url = exportURL {
                 Section { ShareLink(item: url) { Label("Export green file", systemImage: "square.and.arrow.up") } }
             }
@@ -209,6 +210,57 @@ struct MergeSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { model.dismissMerge() } }
             }
+        }
+    }
+}
+
+// MARK: Validation
+
+/// Accuracy check for a scan of a surface with a known grade (level floor or a measured board).
+struct ValidationSection: View {
+    let record: GreenMapRecord
+    @State private var knownSurface = false
+    @State private var expectedText = "0"
+
+    private var expected: Double? {
+        guard knownSurface else { return nil }
+        return Double(expectedText.replacingOccurrences(of: ",", with: "."))
+    }
+
+    var body: some View {
+        Section {
+            Toggle("This was a surface with a known grade", isOn: $knownSurface)
+            if knownSurface {
+                HStack {
+                    Text("Known grade (%)")
+                    Spacer()
+                    TextField("0", text: $expectedText)
+                        .keyboardType(.numbersAndPunctuation)
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: 80)
+                }
+            }
+            if let report = ValidationReport.make(from: record, expectedGradePercent: expected) {
+                LabeledContent("Fitted plane grade", value: String(format: "%.2f%%", report.planeGradePercent))
+                if let error = report.gradeErrorPercent {
+                    LabeledContent("Grade error", value: String(format: "%+.2f%%", error))
+                }
+                LabeledContent("Height scatter (rms)", value: String(format: "%.1f mm", report.rmsResidualMillimetres))
+                if let median = report.localGradeErrorMedianPercent, let p95 = report.localGradeErrorP95Percent {
+                    LabeledContent("Local slope error (median / 95th)", value: String(format: "%.2f%% / %.2f%%", median, p95))
+                }
+                ForEach(report.buckets, id: \.label) { bucket in
+                    LabeledContent("Range \(bucket.label)",
+                                   value: String(format: "%.1f mm rms, %d cells", bucket.rmsResidualMillimetres, bucket.cells))
+                }
+                ShareLink(item: report.json) { Label("Share validation report", systemImage: "square.and.arrow.up") }
+            } else {
+                Text("Too few cells for a validation report.").font(.caption).foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Validation")
+        } footer: {
+            Text("Scan a level floor or a board set to a known grade, then compare. Local slope error shows how much slope noise a putt calculation would see.")
         }
     }
 }
@@ -275,7 +327,7 @@ struct MiniMapCells: View, Equatable {
         Canvas { context, size in
             guard let transform = MiniMapTransform(polygon: snapshot.polygon, size: size) else { return }
             let side = CGFloat(snapshot.cellSize) * transform.scale
-            var good = Path(), weak = Path()
+            var good = Path(), weak = Path(), noisy = Path()
             for c in snapshot.good {
                 let p = transform.point(c.x - snapshot.cellSize / 2, c.y - snapshot.cellSize / 2)
                 good.addRect(CGRect(x: p.x, y: p.y, width: side + 0.5, height: side + 0.5))
@@ -284,8 +336,13 @@ struct MiniMapCells: View, Equatable {
                 let p = transform.point(c.x - snapshot.cellSize / 2, c.y - snapshot.cellSize / 2)
                 weak.addRect(CGRect(x: p.x, y: p.y, width: side + 0.5, height: side + 0.5))
             }
+            for c in snapshot.noisy {
+                let p = transform.point(c.x - snapshot.cellSize / 2, c.y - snapshot.cellSize / 2)
+                noisy.addRect(CGRect(x: p.x, y: p.y, width: side + 0.5, height: side + 0.5))
+            }
             context.fill(good, with: .color(.green.opacity(0.75)))
             context.fill(weak, with: .color(.orange.opacity(0.8)))
+            context.fill(noisy, with: .color(.red.opacity(0.85)))
             var outline = Path()
             for (index, vertex) in snapshot.polygon.enumerated() {
                 let p = transform.point(vertex.x, vertex.y)
@@ -409,6 +466,10 @@ struct MapScanScreen: View {
                 Text(instruction).font(.subheadline.weight(.semibold))
                 Text("\(model.courseName) · Hole \(model.holeNumber) · \(model.trackingText)")
                     .font(.caption).foregroundStyle(.secondary)
+                if model.phase == .scanning, let advice = model.coachMessage {
+                    Label(advice, systemImage: "figure.walk.motion")
+                        .font(.caption.weight(.semibold)).foregroundStyle(.orange)
+                }
             }
             Spacer()
             if model.phase == .scanning {
@@ -453,7 +514,8 @@ struct MapScanScreen: View {
                 ProgressView(value: model.coverage).tint(.mint).accessibilityLabel("Scan coverage")
                 HStack {
                     Label("Scanned", systemImage: "square.fill").foregroundStyle(.green)
-                    Label("Scan closer", systemImage: "square.fill").foregroundStyle(.orange)
+                    Label("Closer", systemImage: "square.fill").foregroundStyle(.orange)
+                    Label("Noisy", systemImage: "square.fill").foregroundStyle(.red)
                     Spacer()
                     Text("Quality \(model.quality.formatted(.percent.precision(.fractionLength(0))))")
                         .monospacedDigit()

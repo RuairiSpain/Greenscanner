@@ -11,13 +11,19 @@ struct DepthProjector {
         SIMD3<Float>((u - cx) * depth / fx, (cy - v) * depth / fy, -depth)
     }
 
+    /// Surfaces seen at a grazing angle give noisier depth. `rayY` is the vertical component of the
+    /// unit viewing ray; a ray straight down gives weight 1.
+    static func incidenceWeight(rayY: Float) -> Float {
+        max(0.2, abs(rayY))
+    }
+
     static func rangeWeight(depth: Float) -> Float {
         let ratio = 1.5 / max(depth, 0.25)
         return min(1, ratio * ratio)
     }
 
-    static func project(frame: ARFrame, stride: Int = 2) -> [WorldSample] {
-        guard let depthData = frame.sceneDepth else { return [] }
+    static func project(frame: ARFrame, stride: Int = 2, smoothed: Bool = false) -> [WorldSample] {
+        guard let depthData = (smoothed ? frame.smoothedSceneDepth : nil) ?? frame.sceneDepth else { return [] }
         let depthMap = depthData.depthMap
         guard CVPixelBufferGetPixelFormatType(depthMap) == kCVPixelFormatType_DepthFloat32 else { return [] }
         let width = CVPixelBufferGetWidth(depthMap)
@@ -69,9 +75,11 @@ struct DepthProjector {
                 // ARCamera uses a right-handed camera space looking along negative Z.
                 let point = cameraPoint(u: Float(u), v: Float(v), depth: depth, fx: fx, fy: fy, cx: cx, cy: cy)
                 let world = cameraToWorld * SIMD4<Float>(point.x, point.y, point.z, 1)
+                let rayY = (world.y - cameraToWorld.columns.3.y) / max(simd_length(point), 0.001)
                 output.append(WorldSample(
                     position: SIMD3<Float>(world.x, world.y, world.z),
                     weight: (confidence == ARConfidenceLevel.high.rawValue ? 2 : 1) * rangeWeight(depth: depth)
+                    * incidenceWeight(rayY: rayY)
                 ))
             }
         }
