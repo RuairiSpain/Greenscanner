@@ -36,6 +36,10 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
     @Published var zoneGuidance = "Walk the inside and cover the grey areas on the map."
     @Published var zones: [ZoneStatus] = []
     @Published var coachMessage: String?
+    @Published var draft: MapDraftHeader?
+    @Published var draftBusy = false
+    @Published var awaitingRelocalization = false
+    @Published var recoveryMessage: String?
     @Published var depthSource: DepthSource {
         didSet { UserDefaults.standard.set(depthSource.rawValue, forKey: "greensight.depthSource") }
     }
@@ -65,6 +69,13 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
     private var scenePhaseActive = true
     private var sessionPausedByUs = false
     private var coach = MotionCoach()
+    private let draftStore = DraftStore()
+    private var pendingWorldMap: ARWorldMap?
+    private var restoredHeadingAligned: Bool?
+    private var lastCheckpoint: TimeInterval = 0
+    private var checkpointInFlight = false
+    private var draftGeneration = 0
+    private var lastMappingStatus: ARFrame.WorldMappingStatus = .notAvailable
     private var lastCoachHaptic: TimeInterval = 0
 
     override init() {
@@ -74,9 +85,14 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
             DispatchQueue.main.async { self?.objectWillChange.send() }
         }
         let store = self.store
+        let draftStore = self.draftStore
         persistenceQueue.async { [weak self] in
             let loaded = store.loadAll()
-            DispatchQueue.main.async { self?.records = loaded }
+            let header = draftStore.loadHeader()
+            DispatchQueue.main.async {
+                self?.records = loaded
+                self?.draft = header
+            }
         }
     }
 
@@ -188,6 +204,10 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
             setupError = "Mapping needs a LiDAR iPhone or iPad."
             return
         }
+        guard draft == nil else {
+            setupError = "Finish, save or discard the unfinished scan below before starting a new one."
+            return
+        }
         courseName = name
         setupError = nil
         resetMappingState()
@@ -222,6 +242,7 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
         lastWasNormal = true
         sessionPausedByUs = false
         trackingText = "Initialising"
+        awaitingRelocalization = false
     }
 
     @MainActor
@@ -242,8 +263,17 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
         }
         configuration.planeDetection = [.horizontal]
         configuration.environmentTexturing = .none
+        if let map = pendingWorldMap {
+            // Resuming a saved scan: relocalise against the saved map so its coordinates stay valid.
+            configuration.initialWorldMap = map
+            pendingWorldMap = nil
+        }
         // Heading alignment puts +x east and +z south, which lets separate scans of one green be aligned later.
-        if location.canAlignToHeading {
+        if let aligned = restoredHeadingAligned {
+            configuration.worldAlignment = aligned ? .gravityAndHeading : .gravity
+            headingAligned = aligned
+            restoredHeadingAligned = nil
+        } else if location.canAlignToHeading {
             configuration.worldAlignment = .gravityAndHeading
             headingAligned = true
         } else {
@@ -251,10 +281,15 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
             headingAligned = false
         }
         view.session.run(configuration, options: [.resetTracking, .removeExistingAnchors])
+        if !edgeWorld.isEmpty {
+            renderer?.showEdge(edgeWorld, closed: phase != .edge)
+            publishMinimap(polygon: localPolygon(), closed: phase != .edge, good: [], weak: [])
+        }
     }
 
     @MainActor
-    func endMapping() {
+    func endMapping(deletingDraft: Bool = true) {
+        if deletingDraft { discardDraftFiles() }
         arView?.session.pause()
         arView?.session.delegate = nil
         renderer?.detach()
@@ -271,6 +306,7 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
         guard let view = arView else { return }
         if !active {
             guard !sessionPausedByUs else { return }
+            checkpoint(force: true, backgroundTask: true)
             view.session.pause()
             sessionPausedByUs = true
         } else if sessionPausedByUs {
@@ -321,6 +357,7 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
         edgeProblem = nil
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         refreshEdge()
+        checkpoint(force: false)
     }
 
     @MainActor
@@ -359,6 +396,7 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
         publishMinimap(polygon: polygon, closed: true, good: [], weak: [])
         phase = .scanning
         UINotificationFeedbackGenerator().notificationOccurred(.success)
+        checkpoint(force: true)
     }
 
     // MARK: Scanning and review
@@ -377,26 +415,213 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
         let coordinate = originCoordinate
         let currentScan = scanID
         processingQueue.async { [weak self] in
-            let summary = accumulator.summary()
-            let cells = accumulator.exportCells()
-            let quality = MapQuality.score(coverage: summary.coverage, goodShare: summary.goodShare,
-                                           driftMillimetres: summary.residualMillimetres ?? summary.driftMillimetres,
-                                           trackingLosses: losses, unlinkedZones: summary.unlinkedZones)
-            let record = GreenMapRecord(
-                id: UUID(), courseName: name, holeNumber: hole, createdAt: Date(),
-                cellSize: GreenMapAccumulator.cellSize, edge: edge, cells: cells,
-                coverage: summary.coverage, qualityScore: quality,
-                driftMillimetres: summary.driftMillimetres, trackingLossCount: losses,
-                isPartial: summary.coverage < 0.85, headingAligned: aligned,
-                originLatitude: coordinate?.latitude, originLongitude: coordinate?.longitude,
-                zoneCount: summary.zones.count, residualMillimetres: summary.residualMillimetres,
-                maxCorrectionMillimetres: summary.maxCorrectionMillimetres, unlinkedZones: summary.unlinkedZones,
-                depthSource: depthSourceName, deviceModel: DeviceInfo.machine)
+            let record = Self.buildRecord(accumulator: accumulator, edge: edge, name: name, hole: hole,
+                                          losses: losses, aligned: aligned, coordinate: coordinate,
+                                          depthSource: depthSourceName)
             DispatchQueue.main.async {
                 guard let self, self.scanID == currentScan, self.phase == .review else { return }
                 self.reviewRecord = record
             }
         }
+    }
+
+    static func buildRecord(accumulator: GreenMapAccumulator, edge: [EdgePoint], name: String, hole: Int,
+                                        losses: Int, aligned: Bool, coordinate: CLLocationCoordinate2D?,
+                                        depthSource: String) -> GreenMapRecord {
+        let summary = accumulator.summary()
+        let cells = accumulator.exportCells()
+        let quality = MapQuality.score(coverage: summary.coverage, goodShare: summary.goodShare,
+                                       driftMillimetres: summary.residualMillimetres ?? summary.driftMillimetres,
+                                       trackingLosses: losses, unlinkedZones: summary.unlinkedZones)
+        return GreenMapRecord(
+            id: UUID(), courseName: name, holeNumber: hole, createdAt: Date(),
+            cellSize: GreenMapAccumulator.cellSize, edge: edge, cells: cells,
+            coverage: summary.coverage, qualityScore: quality,
+            driftMillimetres: summary.driftMillimetres, trackingLossCount: losses,
+            isPartial: summary.coverage < 0.85, headingAligned: aligned,
+            originLatitude: coordinate?.latitude, originLongitude: coordinate?.longitude,
+            zoneCount: summary.zones.count, residualMillimetres: summary.residualMillimetres,
+            maxCorrectionMillimetres: summary.maxCorrectionMillimetres, unlinkedZones: summary.unlinkedZones,
+            depthSource: depthSource, deviceModel: DeviceInfo.machine)
+    }
+
+    // MARK: Drafts (resumable scans)
+
+    /// True when leaving now would lose real work.
+    var hasUnsavedWork: Bool {
+        (phase == .scanning && coverage > 0.05) || (phase == .edge && edgePointCount >= 3) || phase == .review
+    }
+
+    @MainActor
+    private func discardDraftFiles() {
+        draftGeneration += 1
+        draft = nil
+        let draftStore = self.draftStore
+        persistenceQueue.async { draftStore.delete() }
+    }
+
+    @MainActor
+    func discardDraft() { discardDraftFiles() }
+
+    /// Writes the session to disk: edge points, scan data and, when ARKit can provide one, the world map
+    /// that lets a restarted session relocalise into the same coordinates.
+    @MainActor
+    private func checkpoint(force: Bool, backgroundTask: Bool = false) {
+        guard isMapping, !awaitingRelocalization, !edgeWorld.isEmpty else { return }
+        let now = Date.timeIntervalSinceReferenceDate
+        let interval: TimeInterval = phase == .edge ? 8 : 30
+        guard force || now - lastCheckpoint >= interval else { return }
+        guard !checkpointInFlight || now - lastCheckpoint > 60 else { return }
+        lastCheckpoint = now
+        checkpointInFlight = true
+
+        let isScanning = phase != .edge
+        let header = MapDraftHeader(courseName: courseName, holeNumber: holeNumber,
+                                    phase: isScanning ? "scanning" : "edge", savedAt: Date(), coverage: coverage,
+                                    edgePointCount: edgeWorld.count, hasScanData: isScanning, hasWorldMap: false)
+        let basePayload = MapDraftPayload(edgeWorld: edgeWorld, origin: origin, headingAligned: headingAligned,
+                                          originLatitude: originCoordinate?.latitude,
+                                          originLongitude: originCoordinate?.longitude,
+                                          trackingLossCount: trackingLossCount, depthSource: depthSource.rawValue,
+                                          accumulator: nil)
+        let accumulator = self.accumulator
+        let draftStore = self.draftStore
+
+        let taskBox = BackgroundTaskBox()
+        if backgroundTask {
+            taskBox.id = UIApplication.shared.beginBackgroundTask(withName: "greensight.checkpoint") {
+                UIApplication.shared.endBackgroundTask(taskBox.id)
+                taskBox.id = .invalid
+            }
+        }
+
+        let generation = draftGeneration
+        let write: (ARWorldMap?) -> Void = { [weak self] map in
+            DispatchQueue.main.async {
+                // The world map can arrive after the user has finished or discarded the scan; do not recreate the draft.
+                guard let self, self.draftGeneration == generation else {
+                    if taskBox.id != .invalid {
+                        UIApplication.shared.endBackgroundTask(taskBox.id)
+                        taskBox.id = .invalid
+                    }
+                    self?.checkpointInFlight = false
+                    return
+                }
+                self.persistenceQueue.async {
+                    var payload = basePayload
+                    payload.accumulator = isScanning ? accumulator.snapshot() : nil
+                    let mapData = map.flatMap { try? NSKeyedArchiver.archivedData(withRootObject: $0, requiringSecureCoding: true) }
+                    let saved = draftStore.save(header: header, payload: payload, worldMapData: mapData)
+                    DispatchQueue.main.async {
+                        self.checkpointInFlight = false
+                        if let saved, self.draftGeneration == generation { self.draft = saved }
+                        if taskBox.id != .invalid {
+                            UIApplication.shared.endBackgroundTask(taskBox.id)
+                            taskBox.id = .invalid
+                        }
+                    }
+                }
+            }
+        }
+
+        if let view = arView, lastMappingStatus == .mapped || lastMappingStatus == .extending {
+            view.session.getCurrentWorldMap { map, _ in write(map) }
+        } else {
+            write(nil)
+        }
+    }
+
+    /// Continues a saved scan: restores the data, then relocalises against the saved world map.
+    @MainActor
+    func resumeDraft() {
+        guard let header = draft, header.hasWorldMap, !draftBusy else { return }
+        draftBusy = true
+        let draftStore = self.draftStore
+        persistenceQueue.async { [weak self] in
+            let payload = draftStore.loadPayload()
+            let mapData = draftStore.loadWorldMapData()
+            let map = mapData.flatMap { try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: $0) }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.draftBusy = false
+                guard let payload, let map else {
+                    self.recoveryMessage = "The saved scan could not be loaded. You can still save what was captured."
+                    return
+                }
+                self.courseName = header.courseName
+                self.holeNumber = header.holeNumber
+                self.resetMappingState()
+                self.edgeWorld = payload.edgeWorld
+                self.edgePointCount = payload.edgeWorld.count
+                self.origin = payload.origin
+                if let lat = payload.originLatitude, let lon = payload.originLongitude {
+                    self.originCoordinate = CLLocationCoordinate2D(latitude: lat, longitude: lon)
+                }
+                self.trackingLossCount = payload.trackingLossCount
+                self.restoredHeadingAligned = payload.headingAligned
+                if let snapshot = payload.accumulator {
+                    self.accumulator.restore(snapshot, scanID: self.scanID)
+                    self.phase = .scanning
+                    self.coverage = header.coverage
+                } else {
+                    self.phase = .edge
+                }
+                self.pendingWorldMap = map
+                self.awaitingRelocalization = true
+                self.lastWasNormal = false
+                self.isMapping = true
+            }
+        }
+    }
+
+    /// Saves whatever a draft captured as a (partial) green without restarting the camera.
+    @MainActor
+    func recoverDraftAsGreen() {
+        guard let header = draft, header.hasScanData, !draftBusy else { return }
+        draftBusy = true
+        let draftStore = self.draftStore
+        let store = self.store
+        persistenceQueue.async { [weak self] in
+            guard let payload = draftStore.loadPayload(), let snapshot = payload.accumulator else {
+                DispatchQueue.main.async {
+                    self?.draftBusy = false
+                    self?.recoveryMessage = "The saved scan data could not be read."
+                }
+                return
+            }
+            let recovered = GreenMapAccumulator()
+            recovered.restore(snapshot, scanID: UUID())
+            let edge = payload.edgeWorld.map { EdgePoint(x: $0.x - payload.origin.x, z: $0.z - payload.origin.z) }
+            let coordinate: CLLocationCoordinate2D? = {
+                guard let lat = payload.originLatitude, let lon = payload.originLongitude else { return nil }
+                return CLLocationCoordinate2D(latitude: lat, longitude: lon)
+            }()
+            let record = Self.buildRecord(accumulator: recovered, edge: edge, name: header.courseName,
+                                          hole: header.holeNumber, losses: payload.trackingLossCount,
+                                          aligned: payload.headingAligned, coordinate: coordinate,
+                                          depthSource: payload.depthSource)
+            store.save(record)
+            draftStore.delete()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.draftBusy = false
+                self.draft = nil
+                self.records.insert(record, at: 0)
+                self.recoveryMessage = "Saved \(header.courseName) hole \(header.holeNumber) with "
+                    + "\(record.coverage.formatted(.percent.precision(.fractionLength(0)))) coverage."
+            }
+        }
+    }
+
+    /// Leaves the camera view but keeps the saved draft, for example when relocalising does not succeed.
+    @MainActor
+    func leaveKeepingDraft() { endMapping(deletingDraft: false) }
+
+    /// Gives up on relocalising and saves what the interrupted scan had captured.
+    @MainActor
+    func abandonRelocalizationAndSave() {
+        endMapping(deletingDraft: false)
+        recoverDraftAsGreen()
     }
 
     @MainActor
@@ -428,6 +653,7 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
         case .normal:
             trackingText = "Tracking stable"
             lastWasNormal = true
+            if awaitingRelocalization { awaitingRelocalization = false }
         case .notAvailable:
             trackingText = "Tracking unavailable"
             noteLoss()
@@ -471,6 +697,7 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         frameCounter += 1
         let n = frameCounter
+        lastMappingStatus = frame.worldMappingStatus
         guard case .normal = frame.camera.trackingState else { return }
         let column = frame.camera.transform.columns.3
         let camera = SIMD3<Float>(column.x, column.y, column.z)
@@ -544,6 +771,7 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
                                    driftMillimetres: summary.residualMillimetres ?? summary.driftMillimetres,
                                    trackingLosses: trackingLossCount, unlinkedZones: summary.unlinkedZones)
         renderer?.showCoverage(good: good, weak: weak, noisy: noisy, origin: origin)
+        checkpoint(force: false)
         publishMinimap(polygon: localPolygon(), closed: true,
                        good: good.map { SIMD2<Float>($0.x, $0.z) }, weak: weak.map { SIMD2<Float>($0.x, $0.z) },
                        noisy: noisy.map { SIMD2<Float>($0.x, $0.z) }, zones: summary.zones, highlight: guidance.highlight)
@@ -567,4 +795,8 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
         }
         return nil
     }
+}
+
+private final class BackgroundTaskBox: @unchecked Sendable {
+    var id = UIBackgroundTaskIdentifier.invalid
 }

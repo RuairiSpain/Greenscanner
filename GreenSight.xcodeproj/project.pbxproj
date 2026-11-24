@@ -40,6 +40,12 @@
 		8C62EFA5DD20EE7A83D93AE2 = {
 			isa = PBXBuildFile; fileRef = 0D90F084DABA3FEE012CD708 /* DepthProjector.swift */;
 		};
+		5896CA857AF5DAF652F46143 = {
+			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DraftStore.swift"; sourceTree = "<group>";
+		};
+		70ACDD774B463115AE2080B0 = {
+			isa = PBXBuildFile; fileRef = 5896CA857AF5DAF652F46143 /* DraftStore.swift */;
+		};
 		E6E9E88FF6C0F09B238730B2 = {
 			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GreenGeometry.swift"; sourceTree = "<group>";
 		};
@@ -202,6 +208,7 @@
 				EDF27BD80B9353A84C5E7023 /* ContentView.swift */,
 				052FEDCDD6152B61E1D45BC4 /* DemoFactory.swift */,
 				0D90F084DABA3FEE012CD708 /* DepthProjector.swift */,
+				5896CA857AF5DAF652F46143 /* DraftStore.swift */,
 				E6E9E88FF6C0F09B238730B2 /* GreenGeometry.swift */,
 				539349829DF90F6733A21D59 /* GreenMapAccumulator.swift */,
 				646F34D0F50E8A81D212AFA1 /* GreenMapModels.swift */,
@@ -250,6 +257,7 @@
 				3515404FF8FDBB221A5E7E05 /* ContentView.swift in Sources */,
 				C91C65FA76EC58B06B1A225C /* DemoFactory.swift in Sources */,
 				8C62EFA5DD20EE7A83D93AE2 /* DepthProjector.swift in Sources */,
+				70ACDD774B463115AE2080B0 /* DraftStore.swift in Sources */,
 				13EE8CB48F0A087D6DA1ACE2 /* GreenGeometry.swift in Sources */,
 				EE07D10B3178DFFF251266B0 /* GreenMapAccumulator.swift in Sources */,
 				558B07680DBCB8EAADF344B2 /* GreenMapModels.swift in Sources */,
@@ -343,11 +351,11 @@
 				ASSETCATALOG_COMPILER_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 7;
+				CURRENT_PROJECT_VERSION = 8;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = GreenSight/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.6;
+				MARKETING_VERSION = 1.7;
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.GreenSight;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -365,11 +373,11 @@
 				ASSETCATALOG_COMPILER_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 7;
+				CURRENT_PROJECT_VERSION = 8;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = GreenSight/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.6;
+				MARKETING_VERSION = 1.7;
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.GreenSight;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;

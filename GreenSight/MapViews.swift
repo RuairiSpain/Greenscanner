@@ -30,6 +30,32 @@ struct MapHomeView: View {
     var body: some View {
         NavigationStack {
             List {
+                if let draft = model.draft {
+                    Section {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("\(draft.courseName) · Hole \(draft.holeNumber)").font(.headline)
+                            HStack(spacing: 4) {
+                                Text(draft.phase == "edge" ? "Edge marking" : "\(draft.coverage.formatted(.percent.precision(.fractionLength(0)))) scanned")
+                                Text("· saved")
+                                Text(draft.savedAt, style: .relative)
+                                Text("ago")
+                            }
+                            .font(.caption).foregroundStyle(.secondary)
+                        }
+                        if draft.hasWorldMap {
+                            Button { model.resumeDraft() } label: { Label("Resume scan", systemImage: "play.fill") }
+                        }
+                        if draft.hasScanData {
+                            Button { model.recoverDraftAsGreen() } label: { Label("Save what was captured", systemImage: "tray.and.arrow.down") }
+                        }
+                        Button(role: .destructive) { model.discardDraft() } label: { Label("Discard", systemImage: "trash") }
+                    } header: {
+                        Text("Unfinished scan")
+                    } footer: {
+                        Text("Resuming needs you to stand where you were scanning so the camera can recognise the spot. Grass has few features, so it may not relocalise; saving what was captured always works.")
+                    }
+                    .disabled(model.draftBusy)
+                }
                 Section {
                     TextField("Course name", text: $model.courseName)
                         .textInputAutocapitalization(.words)
@@ -87,6 +113,10 @@ struct MapHomeView: View {
             .fileImporter(isPresented: $importing, allowedContentTypes: [.json]) { result in
                 if case .success(let url) = result { model.importGreen(from: url) }
             }
+            .alert("Scan recovery", isPresented: Binding(get: { model.recoveryMessage != nil },
+                                                          set: { if !$0 { model.recoveryMessage = nil } })) {
+                Button("OK", role: .cancel) {}
+            } message: { Text(model.recoveryMessage ?? "") }
             .alert("Import failed", isPresented: Binding(get: { model.importError != nil },
                                                           set: { if !$0 { model.importError = nil } })) {
                 Button("OK", role: .cancel) {}
@@ -425,6 +455,11 @@ private struct MiniMapTransform {
 struct MapScanScreen: View {
     @EnvironmentObject private var model: MapModel
     @Environment(\.scenePhase) private var scenePhase
+    @State private var confirmDiscard = false
+
+    private func requestCancel() {
+        if model.hasUnsavedWork { confirmDiscard = true } else { model.endMapping() }
+    }
 
     var body: some View {
         ZStack {
@@ -457,6 +492,12 @@ struct MapScanScreen: View {
             if model.phase == .review { reviewOverlay }
         }
         .onChange(of: scenePhase) { _, newPhase in model.setSessionActive(newPhase == .active) }
+        .confirmationDialog("Discard this scan?", isPresented: $confirmDiscard, titleVisibility: .visible) {
+            Button("Discard scan", role: .destructive) { model.endMapping() }
+            Button("Keep scanning", role: .cancel) {}
+        } message: {
+            Text("The scan so far will be deleted. Progress is otherwise saved automatically.")
+        }
     }
 
     private var header: some View {
@@ -484,6 +525,8 @@ struct MapScanScreen: View {
 
     private var instruction: String {
         switch model.phase {
+        case .edge where model.awaitingRelocalization: return "Walk back to where you were marking the edge and point at the ground."
+        case .scanning where model.awaitingRelocalization: return "Walk back to where you were scanning and point at the ground until tracking resumes."
         case .edge: return "Walk the edge of the green and mark where the fringe begins."
         case .scanning: return model.zoneGuidance
         case .review: return "Review the scan."
@@ -493,6 +536,18 @@ struct MapScanScreen: View {
     @ViewBuilder
     private var controls: some View {
         VStack(spacing: 10) {
+            if model.awaitingRelocalization {
+                Text("Waiting for the camera to recognise the spot. If it does not, you can keep the saved scan for later or save what was captured.")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Button("Leave for later") { model.leaveKeepingDraft() }.buttonStyle(.bordered)
+                    Spacer()
+                    if model.draft?.hasScanData == true {
+                        Button("Save what was captured") { model.abandonRelocalizationAndSave() }
+                            .buttonStyle(.borderedProminent).tint(.mint)
+                    }
+                }
+            } else {
             switch model.phase {
             case .edge:
                 Toggle("Auto-drop a point every 2 m", isOn: $model.autoEdge)
@@ -502,7 +557,7 @@ struct MapScanScreen: View {
                     Text(problem).font(.caption).foregroundStyle(.orange)
                 }
                 HStack {
-                    Button("Cancel", role: .destructive) { model.endMapping() }.buttonStyle(.bordered)
+                    Button("Cancel", role: .destructive) { requestCancel() }.buttonStyle(.bordered)
                     Button("Undo") { model.undoEdgePoint() }
                         .buttonStyle(.bordered).disabled(model.edgePointCount == 0)
                     Spacer()
@@ -512,6 +567,7 @@ struct MapScanScreen: View {
                 }
             case .scanning:
                 ProgressView(value: model.coverage).tint(.mint).accessibilityLabel("Scan coverage")
+                Text("Progress is saved automatically.").font(.caption2).foregroundStyle(.secondary)
                 HStack {
                     Label("Scanned", systemImage: "square.fill").foregroundStyle(.green)
                     Label("Closer", systemImage: "square.fill").foregroundStyle(.orange)
@@ -533,13 +589,14 @@ struct MapScanScreen: View {
                         .font(.caption).foregroundStyle(.orange)
                 }
                 HStack {
-                    Button("Cancel", role: .destructive) { model.endMapping() }.buttonStyle(.bordered)
+                    Button("Cancel", role: .destructive) { requestCancel() }.buttonStyle(.bordered)
                     Spacer()
                     Button("Finish") { model.finishScanning() }
                         .buttonStyle(.borderedProminent).tint(.mint)
                 }
             case .review:
                 EmptyView()
+            }
             }
         }
         .padding(16)

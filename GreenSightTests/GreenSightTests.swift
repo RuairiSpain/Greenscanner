@@ -259,6 +259,77 @@ final class GreenSightTests: XCTestCase {
         XCTAssertEqual(decoded.edge.count, 4)
     }
 
+    // MARK: Resumable scans
+
+    func testAccumulatorSnapshotRestoresScan() throws {
+        let original = GreenMapAccumulator()
+        let id = UUID()
+        original.configure(polygon: longGreen, origin: SIMD3<Float>(1, 2, 3), scanID: id)
+        for step in 0..<4 {
+            original.ingest(block(x: 1.01...9, z: 3.01...8.99, height: 2), camera: SIMD3<Float>(4, 3.5, 6),
+                            timestamp: Double(step), scanID: id)
+        }
+        let snapshot = try XCTUnwrap(original.snapshot())
+        let plist = PropertyListEncoder(); plist.outputFormat = .binary
+        let decoded = try PropertyListDecoder().decode(GreenMapAccumulator.Snapshot.self, from: plist.encode(snapshot))
+
+        let restored = GreenMapAccumulator()
+        restored.restore(decoded, scanID: UUID())
+        let before = original.summary(), after = restored.summary()
+        XCTAssertEqual(after.good + after.weak + after.noisy, before.good + before.weak + before.noisy)
+        XCTAssertEqual(after.total, before.total)
+        let a = original.exportCells(smooth: false), b = restored.exportCells(smooth: false)
+        XCTAssertEqual(a.count, b.count)
+        XCTAssertEqual(a.first?.height ?? 0, b.first?.height ?? 1, accuracy: 1e-6)
+    }
+
+    func testRestoredScanTiesNewDataToSavedDataAfterDrift() throws {
+        let original = GreenMapAccumulator()
+        let id = UUID()
+        original.configure(polygon: longGreen, origin: .zero, scanID: id)
+        for step in 0..<4 {
+            original.ingest(block(x: 0.01...8, z: 0.01...5.99, height: 0), camera: SIMD3<Float>(3, 1.5, 3),
+                            timestamp: Double(step), scanID: id)
+        }
+        // After a restart, relocalisation is off by 0.02 m vertically; the shared area must pull it back.
+        let restored = GreenMapAccumulator()
+        let newID = UUID()
+        restored.restore(try XCTUnwrap(original.snapshot()), scanID: newID)
+        for step in 0..<4 {
+            restored.ingest(block(x: 4.01...13.99, z: 0.01...5.99, height: 0.02), camera: SIMD3<Float>(9, 1.5, 3),
+                            timestamp: 100 + Double(step), scanID: newID)
+        }
+        for cell in restored.exportCells(smooth: false) {
+            XCTAssertEqual(cell.height, 0, accuracy: 0.004)
+        }
+    }
+
+    func testDraftStoreRoundTripAndDelete() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("draft-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = DraftStore(directory: directory)
+        XCTAssertNil(store.loadHeader())
+
+        let header = MapDraftHeader(courseName: "Links", holeNumber: 4, phase: "scanning", savedAt: Date(),
+                                    coverage: 0.5, edgePointCount: 6, hasScanData: true, hasWorldMap: false)
+        let payload = MapDraftPayload(edgeWorld: [SIMD3<Float>(1, 0, 2), SIMD3<Float>(3, 0, 4)], origin: SIMD3<Float>(1, 0, 2),
+                                      headingAligned: true, originLatitude: 53.3, originLongitude: -6.2,
+                                      trackingLossCount: 2, depthSource: "raw", accumulator: nil)
+        let saved = try XCTUnwrap(store.save(header: header, payload: payload, worldMapData: Data([1, 2, 3])))
+        XCTAssertTrue(saved.hasWorldMap)
+        XCTAssertEqual(store.loadHeader()?.courseName, "Links")
+        XCTAssertEqual(store.loadPayload()?.edgeWorld.count, 2)
+        XCTAssertEqual(store.loadWorldMapData(), Data([1, 2, 3]))
+
+        // A later save without a new world map keeps the old one.
+        let again = try XCTUnwrap(store.save(header: header, payload: payload, worldMapData: nil))
+        XCTAssertTrue(again.hasWorldMap)
+
+        store.delete()
+        XCTAssertNil(store.loadHeader())
+        XCTAssertNil(store.loadPayload())
+    }
+
     // MARK: Scan quality
 
     private func cameraPose(position: SIMD3<Float>, forward: SIMD3<Float>) -> simd_float4x4 {

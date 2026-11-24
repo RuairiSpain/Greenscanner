@@ -23,7 +23,7 @@ struct ZoneStatus: Sendable, Equatable {
 /// discontinuity. Cells seen in more than one epoch tie the epochs together, and a least-squares solve
 /// estimates a vertical offset per epoch so tracking drift between passes is removed.
 final class GreenMapAccumulator: @unchecked Sendable {
-    struct Entry {
+    struct Entry: Codable {
         var epoch: Int32
         var sumWeight: Float
         var sumWeightedHeight: Float
@@ -213,6 +213,47 @@ final class GreenMapAccumulator: @unchecked Sendable {
         }
         assign()
         return (assignment, centres)
+    }
+
+    // MARK: Persistence
+
+    /// Everything needed to continue a scan after the app restarts. Zones are rebuilt from the outline.
+    struct Snapshot: Codable, Sendable {
+        struct CellState: Codable, Sendable {
+            let ix: Int32
+            let iz: Int32
+            let entries: [Entry]
+            let count: Int
+            let minRange: Float
+        }
+        let polygon: [SIMD2<Float>]
+        let origin: SIMD3<Float>
+        let cells: [CellState]
+        let epochZones: [Int]
+        let currentZone: Int
+    }
+
+    func snapshot() -> Snapshot? {
+        lock.lock(); defer { lock.unlock() }
+        guard polygon.count >= 3 else { return nil }
+        let states = cells.map { key, cell in
+            Snapshot.CellState(ix: key.x, iz: key.y, entries: cell.entries, count: cell.count, minRange: cell.minRange)
+        }
+        return Snapshot(polygon: polygon, origin: origin, cells: states, epochZones: epochZones, currentZone: currentZone)
+    }
+
+    /// Restores a saved scan. The next observations start a new epoch, so the drift solver ties them to
+    /// the restored data through the cells they share.
+    func restore(_ snapshot: Snapshot, scanID: UUID) {
+        configure(polygon: snapshot.polygon, origin: snapshot.origin, scanID: scanID)
+        lock.lock(); defer { lock.unlock() }
+        for state in snapshot.cells {
+            cells[SIMD2<Int32>(state.ix, state.iz)] = Cell(entries: state.entries, count: state.count, minRange: state.minRange)
+        }
+        epochZones = snapshot.epochZones
+        currentZone = snapshot.currentZone
+        discontinuity = true
+        dirty = true
     }
 
     // MARK: Epochs

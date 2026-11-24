@@ -84,9 +84,9 @@ project_debug = project_common | {"DEBUG_INFORMATION_FORMAT": "dwarf", "ENABLE_T
 project_release = project_common | {"DEBUG_INFORMATION_FORMAT": '"dwarf-with-dsym"', "SWIFT_COMPILATION_MODE": "wholemodule", "SWIFT_OPTIMIZATION_LEVEL": '"-O"'}
 app_common = {
     "ASSETCATALOG_COMPILER_ACCENT_COLOR_NAME": "AccentColor", "ASSETCATALOG_COMPILER_APPICON_NAME": "AppIcon",
-    "CODE_SIGN_STYLE": "Automatic", "CURRENT_PROJECT_VERSION": "7", "GENERATE_INFOPLIST_FILE": "NO",
+    "CODE_SIGN_STYLE": "Automatic", "CURRENT_PROJECT_VERSION": "8", "GENERATE_INFOPLIST_FILE": "NO",
     "INFOPLIST_FILE": "GreenSight/Info.plist", "IPHONEOS_DEPLOYMENT_TARGET": "17.0",
-    "MARKETING_VERSION": "1.6", "PRODUCT_BUNDLE_IDENTIFIER": "com.example.GreenSight",
+    "MARKETING_VERSION": "1.7", "PRODUCT_BUNDLE_IDENTIFIER": "com.example.GreenSight",
     "PRODUCT_NAME": '"$(TARGET_NAME)"', "SDKROOT": "iphoneos", "SUPPORTED_PLATFORMS": '"iphoneos iphonesimulator"',
     "SUPPORTS_MACCATALYST": "NO", "SWIFT_EMIT_LOC_STRINGS": "YES", "TARGETED_DEVICE_FAMILY": '"1,2"',
 }

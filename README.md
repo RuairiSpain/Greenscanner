@@ -162,3 +162,13 @@ Limits: only a vertical offset per epoch is corrected, not tilt or horizontal dr
 - **Coaching.** While scanning, the app warns when the phone is carried faster than 1.2 m/s, turned faster than 70 degrees per second, or held within 20 degrees of level.
 
 The thresholds above are estimates to be tuned from validation scans.
+
+### Resumable scans (v1.7)
+
+While mapping, the session is checkpointed to disk: every 8 s while marking the edge, every 30 s while scanning, when the screen closes the outline, and immediately when the app is interrupted (phone call, home button), using a short background task. A checkpoint holds the edge points, the accumulated scan data and, when ARKit reports a mapped environment, the ARKit world map. If the app is closed or crashes, the Map tab offers the unfinished scan:
+
+- **Resume scan** restarts the camera against the saved world map. Once ARKit relocalises, scanning continues in the same coordinates; the new data starts a new pass, and the drift correction ties it to the restored data through shared cells. Grass has few visual features, so relocalisation can fail.
+- **Save what was captured** builds a (partial) green from the saved data without restarting the camera. It always works if scanning had begun.
+- **Discard** deletes the draft.
+
+Cancel asks for confirmation when there is real progress to lose. Starting a new scan is blocked while a draft exists.
