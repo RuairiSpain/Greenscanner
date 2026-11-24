@@ -205,3 +205,11 @@ Progress advances as the walker comes within 1.2 m of the next few waypoints, an
 - **Metadata.** Each scan stores app and iOS version, start time, duration, frames processed, the hottest thermal state reached, device model and depth source, plus optional conditions chosen on the review screen (surface dry/dew/damp/wet, light, Stimp reading).
 - **Adaptive sampling.** A frame is processed only when the camera has moved 10 cm or turned 5 degrees since the last processed one, or after a second standing still. Depth is read with stride 3, or 4 once 85% of the green is covered.
 - **Thermal budget.** At "fair" the app slows down (fewer frames, coarser depth, slower refresh and saves). At "serious" it also stops colour sampling and warns. At "critical" depth processing pauses, a checkpoint is saved, and the walker is told to let the phone cool.
+
+### Plan a putt on a saved green (v1.12)
+
+The Plan tab uses saved greens, so a putt can be studied without scanning on the day (for example before going to the course). Pick a green, tap the map to place the ball, then switch to "Place cup" and tap where the hole is today (the marked cup is pre-placed and a warning shows how old the pin is). The map shows slope colour, downhill arrows, the outline and, with a photo, the colour image.
+
+The planner cuts a corridor (3 to 6 m wide, 10 cm grid) out of the stored surface along the ball-to-cup line, resamples it into the live reader's frame (facing the cup, the golfer's right is +x) and runs the same rolling model and optimiser, with the Stimp value from the scan's conditions or Settings. It reports aim left or right of the cup, start speed, peak break, uphill or downhill, the chance of holing out under small variations in speed, aim and Stimp, and how much of the line had scan data. It refuses placements outside the outline, putts under 0.5 m or over 25 m, and lines with under 60% scan coverage. A green overview gives the average and steep slopes, the height range and, for north-aligned scans, the direction the whole green falls.
+
+Limits: it is a prediction from a past scan, with the scan's own errors (check the validation report) and the model's assumptions (constant rolling friction, no grain, no lip-outs). It does not place the saved green in the real world, so no AR overlay yet.

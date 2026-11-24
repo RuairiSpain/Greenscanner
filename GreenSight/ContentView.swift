@@ -7,6 +7,8 @@ struct ContentView: View {
                 .tabItem { Label("Read", systemImage: "viewfinder") }
             MapHomeView()
                 .tabItem { Label("Map", systemImage: "map") }
+            PlanHomeView()
+                .tabItem { Label("Plan", systemImage: "target") }
             HistoryView()
                 .tabItem { Label("History", systemImage: "clock.arrow.circlepath") }
             SettingsView()

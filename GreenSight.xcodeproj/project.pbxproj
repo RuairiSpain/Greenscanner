@@ -160,6 +160,18 @@
 		CB3B5B9C36AD100BF85EE6B4 = {
 			isa = PBXBuildFile; fileRef = F585B698B6D9E585A188F67A /* MotionCoach.swift */;
 		};
+		88E4C76CAC17785CCE32A81D = {
+			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PlanViews.swift"; sourceTree = "<group>";
+		};
+		EFA8AE625E7E6D7E04DA256F = {
+			isa = PBXBuildFile; fileRef = 88E4C76CAC17785CCE32A81D /* PlanViews.swift */;
+		};
+		D5B6E97A38A72D83BAC7FB2F = {
+			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PuttPlanner.swift"; sourceTree = "<group>";
+		};
+		6CD47D300B4329DE1E39CD0A = {
+			isa = PBXBuildFile; fileRef = D5B6E97A38A72D83BAC7FB2F /* PuttPlanner.swift */;
+		};
 		880361C93D723785F8667F06 = {
 			isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "PuttingPhysics.swift"; sourceTree = "<group>";
 		};
@@ -252,6 +264,8 @@
 				C1FEFD561274700B40017B10 /* Math.swift */,
 				0E00200D2A63DA5C22BB9E4D /* Models.swift */,
 				F585B698B6D9E585A188F67A /* MotionCoach.swift */,
+				88E4C76CAC17785CCE32A81D /* PlanViews.swift */,
+				D5B6E97A38A72D83BAC7FB2F /* PuttPlanner.swift */,
 				880361C93D723785F8667F06 /* PuttingPhysics.swift */,
 				920A8ED967C32D6DE2D0D6A6 /* ScanStore.swift */,
 				E74A6F5B73F997D51A7D0BA5 /* SettingsView.swift */,
@@ -305,6 +319,8 @@
 				56A3420A394F04294B245AE1 /* Math.swift in Sources */,
 				8C178E85489732C6EB0294EC /* Models.swift in Sources */,
 				CB3B5B9C36AD100BF85EE6B4 /* MotionCoach.swift in Sources */,
+				EFA8AE625E7E6D7E04DA256F /* PlanViews.swift in Sources */,
+				6CD47D300B4329DE1E39CD0A /* PuttPlanner.swift in Sources */,
 				94E00E57988E5613B0F386AB /* PuttingPhysics.swift in Sources */,
 				0373C7D2B92B86B0C47AD44E /* ScanStore.swift in Sources */,
 				39D256F53428C2CD382E3BFF /* SettingsView.swift in Sources */,
@@ -383,11 +399,11 @@
 				ASSETCATALOG_COMPILER_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 12;
+				CURRENT_PROJECT_VERSION = 13;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = GreenSight/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.11;
+				MARKETING_VERSION = 1.12;
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.GreenSight;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -405,11 +421,11 @@
 				ASSETCATALOG_COMPILER_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 12;
+				CURRENT_PROJECT_VERSION = 13;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = GreenSight/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.11;
+				MARKETING_VERSION = 1.12;
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.GreenSight;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;

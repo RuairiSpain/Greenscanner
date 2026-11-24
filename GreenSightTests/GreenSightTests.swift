@@ -259,6 +259,102 @@ final class GreenSightTests: XCTestCase {
         XCTAssertEqual(decoded.edge.count, 4)
     }
 
+    // MARK: Planning putts on saved greens
+
+    /// A 6 x 6 m green whose surface rises `slope` metres per metre of map x. Cells where `keep` is false are missing.
+    private func plannerRecord(slope: Float, keep: (Int, Int) -> Bool = { _, _ in true }) -> GreenMapRecord {
+        var cells: [MapCell] = []
+        for ix in 0..<30 {
+            for iz in 0..<30 where keep(ix, iz) {
+                cells.append(MapCell(ix: ix, iz: iz, height: slope * (Float(ix) + 0.5) * 0.2, observations: 10, bestRange: 1.5, noise: 0.003))
+            }
+        }
+        let outline: [EdgePoint] = [EdgePoint(x: 0, z: 0), EdgePoint(x: 6, z: 0), EdgePoint(x: 6, z: 6), EdgePoint(x: 0, z: 6)]
+        return GreenMapRecord(id: UUID(), courseName: "Plan", holeNumber: 2, createdAt: Date(), cellSize: 0.2, edge: outline,
+                              cells: cells, coverage: 1, qualityScore: 0.8, driftMillimetres: nil, trackingLossCount: 0,
+                              isPartial: false, headingAligned: true, originLatitude: nil, originLongitude: nil)
+    }
+
+    func testHeightFieldIsExactOnAPlane() throws {
+        let field = HeightField(record: plannerRecord(slope: 0.02))
+        let height = try XCTUnwrap(field.height(at: SIMD2<Float>(2.37, 1.11)))
+        XCTAssertEqual(height, 0.02 * 2.37, accuracy: 1e-4)
+        XCTAssertNil(field.height(at: SIMD2<Float>(20, 20)))
+    }
+
+    func testPlannerAimsUphillOfTheBreak() throws {
+        // Facing +z the golfer's right is -x, and this surface falls toward -x, so the ball breaks right: aim left.
+        let putt = try PuttPlanner.plan(record: plannerRecord(slope: 0.02), ball: SIMD2<Float>(3, 1.5),
+                                        cup: SIMD2<Float>(3, 4.5), stimpFeet: 10)
+        XCTAssertEqual(putt.distanceMetres, 3, accuracy: 1e-4)
+        XCTAssertLessThan(putt.solution.aimOffsetCentimetres, -3)
+        XCTAssertGreaterThan(putt.aimPoint.x, 3.01)
+        XCTAssertGreaterThan(putt.breakCentimetres, 3)
+        XCTAssertGreaterThan(putt.path.count, 5)
+        XCTAssertEqual(putt.corridorCoverage, 1, accuracy: 0.01)
+        XCTAssertNotNil(putt.solution.holeProbability)
+    }
+
+    func testPlannerMirrorsWhenThePuttIsReversed() throws {
+        // Putting the other way (facing -z) flips left and right, so the aim flips to the other side.
+        let there = try PuttPlanner.plan(record: plannerRecord(slope: 0.02), ball: SIMD2<Float>(3, 1.5),
+                                         cup: SIMD2<Float>(3, 4.5), stimpFeet: 10)
+        let back = try PuttPlanner.plan(record: plannerRecord(slope: 0.02), ball: SIMD2<Float>(3, 4.5),
+                                        cup: SIMD2<Float>(3, 1.5), stimpFeet: 10)
+        XCTAssertLessThan(there.solution.aimOffsetCentimetres, -3)
+        XCTAssertGreaterThan(back.solution.aimOffsetCentimetres, 3)
+        // Both aim lines lie toward the uphill (+x) side of the cup.
+        XCTAssertGreaterThan(back.aimPoint.x, 3.01)
+    }
+
+    func testPlannerOnFlatGreenAimsStraightAndReportsElevation() throws {
+        let flat = try PuttPlanner.plan(record: plannerRecord(slope: 0), ball: SIMD2<Float>(3, 1.5),
+                                        cup: SIMD2<Float>(3, 4.5), stimpFeet: 10)
+        XCTAssertEqual(flat.solution.aimOffsetCentimetres, 0, accuracy: 3)
+        let uphill = try PuttPlanner.plan(record: plannerRecord(slope: 0.02), ball: SIMD2<Float>(1.5, 3),
+                                          cup: SIMD2<Float>(4.5, 3), stimpFeet: 10)
+        XCTAssertEqual(uphill.elevationChangeCentimetres ?? 0, 6, accuracy: 0.5)
+    }
+
+    func testPlannerRejectsBadPlacements() {
+        let record = plannerRecord(slope: 0)
+        XCTAssertThrowsError(try PuttPlanner.plan(record: record, ball: SIMD2<Float>(10, 10), cup: SIMD2<Float>(3, 3), stimpFeet: 10)) {
+            XCTAssertEqual($0 as? PuttPlanError, .notOnGreen)
+        }
+        XCTAssertThrowsError(try PuttPlanner.plan(record: record, ball: SIMD2<Float>(3, 3), cup: SIMD2<Float>(3, 3.2), stimpFeet: 10)) {
+            XCTAssertEqual($0 as? PuttPlanError, .tooClose)
+        }
+    }
+
+    func testPlannerRefusesUnscannedParts() {
+        let halfScanned = plannerRecord(slope: 0, keep: { ix, _ in ix < 15 })
+        XCTAssertThrowsError(try PuttPlanner.plan(record: halfScanned, ball: SIMD2<Float>(4.5, 1), cup: SIMD2<Float>(4.5, 4), stimpFeet: 10)) {
+            XCTAssertEqual($0 as? PuttPlanError, .sparseData)
+        }
+    }
+
+    func testPlannerWarnsAboutOldPins() throws {
+        var record = plannerRecord(slope: 0)
+        record.pinDate = Date(timeIntervalSince1970: 1_700_000_000)
+        let now = Date(timeIntervalSince1970: 1_700_000_000 + 3 * 86_400 + 100)
+        let putt = try PuttPlanner.plan(record: record, ball: SIMD2<Float>(3, 1.5), cup: SIMD2<Float>(3, 4.5), stimpFeet: 10, now: now)
+        XCTAssertTrue(putt.notes.contains { $0.contains("3 day") })
+    }
+
+    func testGreenSummaryDescribesFallLine() throws {
+        // Rising toward +x (east when north-aligned), so the green falls toward the west.
+        let summary = try XCTUnwrap(GreenSummary.make(from: plannerRecord(slope: 0.02)))
+        XCTAssertEqual(summary.meanGradePercent, 2, accuracy: 0.3)
+        XCTAssertEqual(summary.fallBearingDegrees ?? 0, 270, accuracy: 3)
+        XCTAssertTrue(summary.fallDescription.contains("west"))
+        XCTAssertEqual(summary.areaSquareMetres, 36, accuracy: 0.1)
+        let flat = try XCTUnwrap(GreenSummary.make(from: plannerRecord(slope: 0)))
+        XCTAssertNil(flat.fallBearingDegrees)
+        XCTAssertEqual(GreenSummary.compassName(0), "north")
+        XCTAssertEqual(GreenSummary.compassName(359), "north")
+        XCTAssertEqual(GreenSummary.compassName(135), "south-east")
+    }
+
     // MARK: Capture budget, colour image, metadata
 
     func testThermalPolicyBacksOffAsPhoneHeatsUp() {
