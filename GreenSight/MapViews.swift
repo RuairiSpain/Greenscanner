@@ -139,7 +139,16 @@ struct GreenDetailView: View {
                 LabeledContent("Coverage", value: record.coverage.formatted(.percent.precision(.fractionLength(0))))
                 LabeledContent("Quality", value: record.qualityScore.formatted(.percent.precision(.fractionLength(0))))
                 if let drift = record.driftMillimetres {
-                    LabeledContent("Height drift", value: String(format: "%.0f mm", drift))
+                    LabeledContent("Height drift between passes", value: String(format: "%.0f mm", drift))
+                }
+                if let residual = record.residualMillimetres {
+                    LabeledContent("After correction", value: String(format: "%.0f mm", residual))
+                }
+                if let correction = record.maxCorrectionMillimetres {
+                    LabeledContent("Largest correction", value: String(format: "%.0f mm", correction))
+                }
+                if let zones = record.zoneCount {
+                    LabeledContent("Zones", value: "\(zones)" + ((record.unlinkedZones ?? 0) > 0 ? " (\(record.unlinkedZones ?? 0) unlinked)" : ""))
                 }
                 LabeledContent("Tracking losses", value: "\(record.trackingLossCount)")
                 LabeledContent("Cells", value: "\(record.cells.count)")
@@ -284,6 +293,25 @@ struct MiniMapCells: View, Equatable {
             }
             if snapshot.closed { outline.closeSubpath() }
             context.stroke(outline, with: .color(.white), lineWidth: 1.5)
+
+            // Zone markers: ring colour shows progress, red means the zone is not tied to the rest of the scan.
+            if snapshot.zones.count > 1 {
+                for zone in snapshot.zones {
+                    let p = transform.point(zone.centre.x, zone.centre.y)
+                    let ring: Color
+                    switch zone.state {
+                    case .notStarted: ring = .white.opacity(0.6)
+                    case .inProgress: ring = .orange
+                    case .complete: ring = .green
+                    }
+                    let unlinked = zone.state != .notStarted && !zone.linked
+                    let radius: CGFloat = zone.index == snapshot.highlightZone ? 11 : 9
+                    let circle = Path(ellipseIn: CGRect(x: p.x - radius, y: p.y - radius, width: radius * 2, height: radius * 2))
+                    context.fill(circle, with: .color(.black.opacity(0.6)))
+                    context.stroke(circle, with: .color(unlinked ? .red : ring), lineWidth: zone.index == snapshot.highlightZone ? 3 : 1.5)
+                    context.draw(Text("\(zone.index + 1)").font(.caption2.bold()).foregroundColor(.white), at: p)
+                }
+            }
         }
     }
 }
@@ -396,7 +424,7 @@ struct MapScanScreen: View {
     private var instruction: String {
         switch model.phase {
         case .edge: return "Walk the edge of the green and mark where the fringe begins."
-        case .scanning: return "Walk the inside. Cover the grey areas on the map."
+        case .scanning: return model.zoneGuidance
         case .review: return "Review the scan."
         }
     }
@@ -432,9 +460,10 @@ struct MapScanScreen: View {
                 }
                 .font(.caption)
                 if let drift = model.driftMillimetres, drift > 8 {
-                    Label(String(format: "Height drift about %.0f mm. Close loops and avoid long straight walks.", drift),
+                    let fixed = model.residualMillimetres.map { String(format: ", corrected to %.0f mm", $0) } ?? ""
+                    Label(String(format: "Height drift about %.0f mm between passes", drift) + fixed + ".",
                           systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption).foregroundStyle(.orange)
+                        .font(.caption).foregroundStyle((model.residualMillimetres ?? drift) > 8 ? Color.orange : Color.secondary)
                 }
                 if model.trackingLossCount > 0 {
                     Label("Tracking lost \(model.trackingLossCount) time(s). Revisit those areas.",
@@ -464,6 +493,11 @@ struct MapScanScreen: View {
                 HStack {
                     stat("Coverage", record.coverage)
                     stat("Quality", record.qualityScore)
+                }
+                if let unlinked = record.unlinkedZones, unlinked > 0 {
+                    Label("\(unlinked) zone(s) are not tied to the rest of the scan, so their heights are uncorrected.",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(.orange)
                 }
                 if record.isPartial {
                     Label("Partial scan: under 85% of the green is covered.", systemImage: "exclamationmark.triangle.fill")

@@ -31,6 +31,10 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
     @Published var coverage = 0.0
     @Published var quality = 0.0
     @Published var driftMillimetres: Double?
+    @Published var residualMillimetres: Double?
+    @Published var maxCorrectionMillimetres: Double?
+    @Published var zoneGuidance = "Walk the inside and cover the grey areas on the map."
+    @Published var zones: [ZoneStatus] = []
     @Published var trackingLossCount = 0
     @Published var minimap: MiniMapSnapshot = .empty
     @Published var userPosition: SIMD2<Float>?
@@ -194,6 +198,10 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
         coverage = 0
         quality = 0
         driftMillimetres = nil
+        residualMillimetres = nil
+        maxCorrectionMillimetres = nil
+        zones = []
+        zoneGuidance = "Walk the inside and cover the grey areas on the map."
         trackingLossCount = 0
         minimap = .empty
         userPosition = nil
@@ -260,6 +268,7 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
             configuration.worldAlignment = headingAligned ? .gravityAndHeading : .gravity
             view.session.run(configuration)
             if phase != .review { registerTrackingLoss() }
+            accumulator.markDiscontinuity()
         }
     }
 
@@ -355,14 +364,17 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
             let summary = accumulator.summary()
             let cells = accumulator.exportCells()
             let quality = MapQuality.score(coverage: summary.coverage, goodShare: summary.goodShare,
-                                           driftMillimetres: summary.driftMillimetres, trackingLosses: losses)
+                                           driftMillimetres: summary.residualMillimetres ?? summary.driftMillimetres,
+                                           trackingLosses: losses, unlinkedZones: summary.unlinkedZones)
             let record = GreenMapRecord(
                 id: UUID(), courseName: name, holeNumber: hole, createdAt: Date(),
                 cellSize: GreenMapAccumulator.cellSize, edge: edge, cells: cells,
                 coverage: summary.coverage, qualityScore: quality,
                 driftMillimetres: summary.driftMillimetres, trackingLossCount: losses,
                 isPartial: summary.coverage < 0.85, headingAligned: aligned,
-                originLatitude: coordinate?.latitude, originLongitude: coordinate?.longitude)
+                originLatitude: coordinate?.latitude, originLongitude: coordinate?.longitude,
+                zoneCount: summary.zones.count, residualMillimetres: summary.residualMillimetres,
+                maxCorrectionMillimetres: summary.maxCorrectionMillimetres, unlinkedZones: summary.unlinkedZones)
             DispatchQueue.main.async {
                 guard let self, self.scanID == currentScan, self.phase == .review else { return }
                 self.reviewRecord = record
@@ -416,7 +428,10 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     private func noteLoss() {
-        if lastWasNormal, phase != .review { trackingLossCount += 1 }
+        if lastWasNormal, phase != .review {
+            trackingLossCount += 1
+            accumulator.markDiscontinuity()
+        }
         lastWasNormal = false
     }
 
@@ -489,17 +504,26 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
     private func apply(summary: GreenMapAccumulator.Summary, good: [MapTile], weak: [MapTile]) {
         coverage = summary.coverage
         driftMillimetres = summary.driftMillimetres
+        residualMillimetres = summary.residualMillimetres
+        maxCorrectionMillimetres = summary.maxCorrectionMillimetres
+        zones = summary.zones
+        let guidance = ZoneGuidance.message(zones: summary.zones, user: userPosition)
+        zoneGuidance = guidance.text
         quality = MapQuality.score(coverage: summary.coverage, goodShare: summary.goodShare,
-                                   driftMillimetres: summary.driftMillimetres, trackingLosses: trackingLossCount)
+                                   driftMillimetres: summary.residualMillimetres ?? summary.driftMillimetres,
+                                   trackingLosses: trackingLossCount, unlinkedZones: summary.unlinkedZones)
         renderer?.showCoverage(good: good, weak: weak, origin: origin)
         publishMinimap(polygon: localPolygon(), closed: true,
-                       good: good.map { SIMD2<Float>($0.x, $0.z) }, weak: weak.map { SIMD2<Float>($0.x, $0.z) })
+                       good: good.map { SIMD2<Float>($0.x, $0.z) }, weak: weak.map { SIMD2<Float>($0.x, $0.z) },
+                       zones: summary.zones, highlight: guidance.highlight)
     }
 
     @MainActor
-    private func publishMinimap(polygon: [SIMD2<Float>], closed: Bool, good: [SIMD2<Float>], weak: [SIMD2<Float>]) {
+    private func publishMinimap(polygon: [SIMD2<Float>], closed: Bool, good: [SIMD2<Float>], weak: [SIMD2<Float>],
+                                zones: [ZoneStatus] = [], highlight: Int? = nil) {
         minimapVersion += 1
-        minimap = MiniMapSnapshot(version: minimapVersion, polygon: polygon, closed: closed, good: good, weak: weak)
+        minimap = MiniMapSnapshot(version: minimapVersion, polygon: polygon, closed: closed, good: good, weak: weak,
+                                  zones: zones, highlightZone: highlight)
     }
 
     @MainActor

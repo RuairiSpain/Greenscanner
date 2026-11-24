@@ -66,6 +66,12 @@ struct GreenMapRecord: Codable, Identifiable, Sendable {
     /// Set on merged greens: the scans that were combined.
     var sourceIDs: [UUID]? = nil
     var sourceScanCount: Int? = nil
+    /// Zone workflow results: zone count, height spread between passes after correction, the largest
+    /// vertical correction applied, and zones that could not be tied to the rest of the scan.
+    var zoneCount: Int? = nil
+    var residualMillimetres: Double? = nil
+    var maxCorrectionMillimetres: Double? = nil
+    var unlinkedZones: Int? = nil
 
     var edgeVector: [SIMD2<Float>] { edge.map(\.vector) }
 }
@@ -89,6 +95,8 @@ struct MiniMapSnapshot: Equatable, Sendable {
     var closed = false
     var good: [SIMD2<Float>] = []
     var weak: [SIMD2<Float>] = []
+    var zones: [ZoneStatus] = []
+    var highlightZone: Int?
     var cellSize: Float = GreenMapAccumulator.cellSize
 
     static let empty = MiniMapSnapshot()
@@ -98,7 +106,8 @@ struct MiniMapSnapshot: Equatable, Sendable {
 enum MapQuality {
     /// 0...1. Rewards inside-the-edge coverage and close-range observations, and penalises
     /// measured height drift between revisits and tracking losses.
-    static func score(coverage: Double, goodShare: Double, driftMillimetres: Double?, trackingLosses: Int) -> Double {
+    static func score(coverage: Double, goodShare: Double, driftMillimetres: Double?, trackingLosses: Int,
+                     unlinkedZones: Int = 0) -> Double {
         let drift: Double
         if let driftMillimetres {
             drift = (1 - (driftMillimetres - 5) / 25).clamped(to: 0.3...1)
@@ -106,7 +115,8 @@ enum MapQuality {
             drift = 1
         }
         let losses = max(0.5, 1 - 0.1 * Double(trackingLosses))
-        return (coverage * (0.5 + 0.5 * goodShare) * drift * losses).clamped(to: 0...1)
+        let linkage = max(0.6, 1 - 0.1 * Double(unlinkedZones))
+        return (coverage * (0.5 + 0.5 * goodShare) * drift * losses * linkage).clamped(to: 0...1)
     }
 }
 

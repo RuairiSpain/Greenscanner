@@ -259,6 +259,110 @@ final class GreenSightTests: XCTestCase {
         XCTAssertEqual(decoded.edge.count, 4)
     }
 
+    // MARK: Zones and height correction
+
+    private func block(x: ClosedRange<Float>, z: ClosedRange<Float>, height: Float) -> [WorldSample] {
+        var samples: [WorldSample] = []
+        var px = x.lowerBound
+        while px <= x.upperBound {
+            var pz = z.lowerBound
+            while pz <= z.upperBound {
+                samples.append(WorldSample(position: SIMD3<Float>(px, height, pz), weight: 1))
+                pz += 0.05
+            }
+            px += 0.05
+        }
+        return samples
+    }
+
+    private let longGreen: [SIMD2<Float>] = [SIMD2(0, 0), SIMD2(14, 0), SIMD2(14, 6), SIMD2(0, 6)]
+
+    func testPartitionSplitsLongShapeIntoCompactZones() {
+        var points: [SIMD2<Float>] = []
+        for x in 0..<70 { for z in 0..<30 { points.append(SIMD2(Float(x) * 0.2 + 0.1, Float(z) * 0.2 + 0.1)) } }
+        let result = GreenMapAccumulator.partition(points: points, clusters: 2)
+        XCTAssertEqual(Set(result.assignment).count, 2)
+        let xs = result.centres.map(\.x).sorted()
+        XCTAssertLessThan(xs[0], 5)
+        XCTAssertGreaterThan(xs[1], 9)
+    }
+
+    func testLinearSolverSolvesSmallSystem() throws {
+        let x = try XCTUnwrap(GreenMapAccumulator.solveLinear([2, 1, 1, 3], [5, 10], n: 2))
+        XCTAssertEqual(x[0], 1, accuracy: 1e-9)
+        XCTAssertEqual(x[1], 3, accuracy: 1e-9)
+    }
+
+    func testZonePassesAreTiedTogetherAndDriftIsCorrected() {
+        let accumulator = GreenMapAccumulator()
+        let id = UUID()
+        accumulator.configure(polygon: longGreen, origin: .zero, scanID: id)
+        // Pass 1 stands in the left zone; pass 2 stands in the right zone after 0.03 m of drift.
+        // The two passes both see x in 6...8, which links them.
+        for step in 0..<4 {
+            accumulator.ingest(block(x: 0.01...8, z: 0.01...5.99, height: 0), camera: SIMD3<Float>(3, 1.5, 3),
+                               timestamp: Double(step), scanID: id)
+        }
+        for step in 0..<4 {
+            accumulator.ingest(block(x: 6.01...13.99, z: 0.01...5.99, height: 0.03), camera: SIMD3<Float>(11, 1.5, 3),
+                               timestamp: 5 + Double(step), scanID: id)
+        }
+        let summary = accumulator.summary()
+        XCTAssertEqual(summary.zones.count, 2)
+        XCTAssertEqual(summary.unlinkedZones, 0)
+        XCTAssertEqual(summary.driftMillimetres ?? 0, 30, accuracy: 3)
+        XCTAssertLessThan(summary.residualMillimetres ?? 99, 3)
+        XCTAssertEqual(summary.maxCorrectionMillimetres ?? 0, 30, accuracy: 3)
+        for cell in accumulator.exportCells() {
+            XCTAssertEqual(cell.height, 0, accuracy: 0.004)
+        }
+    }
+
+    func testZoneWithoutOverlapIsReportedUnlinked() {
+        let accumulator = GreenMapAccumulator()
+        let id = UUID()
+        accumulator.configure(polygon: longGreen, origin: .zero, scanID: id)
+        for step in 0..<4 {
+            accumulator.ingest(block(x: 0.01...5, z: 0.01...5.99, height: 0), camera: SIMD3<Float>(3, 1.5, 3),
+                               timestamp: Double(step), scanID: id)
+        }
+        for step in 0..<4 {
+            accumulator.ingest(block(x: 9.01...13.99, z: 0.01...5.99, height: 0.03), camera: SIMD3<Float>(11, 1.5, 3),
+                               timestamp: 5 + Double(step), scanID: id)
+        }
+        let summary = accumulator.summary()
+        XCTAssertEqual(summary.unlinkedZones, 1)
+        let guidance = ZoneGuidance.message(zones: summary.zones, user: SIMD2<Float>(11, 3))
+        XCTAssertNotNil(guidance.highlight)
+        XCTAssertTrue(guidance.text.contains("not linked"))
+    }
+
+    func testDiscontinuityStartsNewEpochSoJumpIsCorrected() {
+        let accumulator = GreenMapAccumulator()
+        let id = UUID()
+        accumulator.configure(polygon: square, origin: .zero, scanID: id)
+        for step in 0..<4 {
+            accumulator.ingest(flatSamples(), camera: SIMD3<Float>(2, 1.5, 2), timestamp: Double(step), scanID: id)
+        }
+        accumulator.markDiscontinuity()
+        for step in 0..<4 {
+            accumulator.ingest(flatSamples(height: 0.03), camera: SIMD3<Float>(2, 1.5, 2), timestamp: 5 + Double(step), scanID: id)
+        }
+        for cell in accumulator.exportCells() {
+            XCTAssertEqual(cell.height, 0, accuracy: 0.004)
+        }
+    }
+
+    func testGuidanceDirectsToNextZone() {
+        let zones = [
+            ZoneStatus(index: 0, centre: SIMD2(2, 3), cellCount: 100, coveredCount: 100, state: .complete, linked: true),
+            ZoneStatus(index: 1, centre: SIMD2(8, 3), cellCount: 100, coveredCount: 0, state: .notStarted, linked: false)
+        ]
+        let guidance = ZoneGuidance.message(zones: zones, user: SIMD2(3, 3))
+        XCTAssertEqual(guidance.highlight, 1)
+        XCTAssertTrue(guidance.text.contains("zone 2"))
+    }
+
     // MARK: Merging
 
     /// Asymmetric L-shaped green in world metres.

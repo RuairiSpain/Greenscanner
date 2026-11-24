@@ -42,7 +42,7 @@ struct SettingsView: View {
                     Text("Camera and depth frames are processed on-device. Saved reads contain reconstructed surface cells and calculated paths—not photos or video.")
                 }
                 Section("About") {
-                    LabeledContent("Version", value: "1.4 (5)")
+                    LabeledContent("Version", value: "1.5 (6)")
                     LabeledContent("Grid", value: "30 mm")
                     LabeledContent("Physics", value: "Rolling sphere + Stimp drag")
                 }

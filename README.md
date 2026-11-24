@@ -143,3 +143,11 @@ A separate tab for scanning a whole green so its slopes can be shared later. Flo
 ### Merging scans (v1.4)
 
 When a course has two or more scans of the same hole, the Map tab offers "Merge n scans". The best-quality scan is the reference. Every other scan is aligned to it by overlaying the green outlines (rotation limited to about 25 degrees when both scans are north-aligned, a full search otherwise), then its heights are corrected for a constant offset and, when well constrained, a small tilt, using the area both scans cover. Cells are combined by quality, observation count and range weighting, with disagreeing outliers rejected. The merged outline is the union of the aligned outlines. A scan that does not match is skipped and the reason is shown before you save.
+
+### Zones and height correction (v1.5)
+
+Once the outline is closed, the green is split into compact zones of about 6 m (k-means on the cells inside the outline). The minimap shows each zone as a numbered ring (white not started, orange in progress, green 90% covered) and the header tells the user which zone to finish, start or link next.
+
+Scan data is grouped into epochs: a new epoch begins when the camera enters another zone, after 40 s, or after a tracking loss or session resume. Cells seen in more than one epoch tie those epochs together, and a least-squares solve estimates one vertical offset per epoch (the first epoch is the reference). Offsets are applied to the saved heights and to the AR overlay. Epochs that share fewer than 8 cells cannot be corrected, and their zone is flagged red ("not linked") with a prompt to walk across the boundary. The record stores the spread between passes before and after correction, the largest correction and the number of unlinked zones, and unlinked zones lower the quality score.
+
+Limits: only a vertical offset per epoch is corrected, not tilt or horizontal drift, and a horizontal jump after tracking loss is not repaired.
