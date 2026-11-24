@@ -139,3 +139,7 @@ MIT. See `LICENSE`.
 ## Map a Green mode (v1.3, work in progress)
 
 A separate tab for scanning a whole green so its slopes can be shared later. Flow: choose course and hole, mark the green edge (tap, "Add point", or auto-drop every 2 m), close the shape, then walk the inside while the AR overlay and minimap show scanned (green) and too-far (amber) areas. Reads are saved locally per green and can be exported or imported as `.greensight.json` files. Upload and merging of several users' scans are not implemented yet.
+
+### Merging scans (v1.4)
+
+When a course has two or more scans of the same hole, the Map tab offers "Merge n scans". The best-quality scan is the reference. Every other scan is aligned to it by overlaying the green outlines (rotation limited to about 25 degrees when both scans are north-aligned, a full search otherwise), then its heights are corrected for a constant offset and, when well constrained, a small tilt, using the area both scans cover. Cells are combined by quality, observation count and range weighting, with disagreeing outliers rejected. The merged outline is the union of the aligned outlines. A scan that does not match is skipped and the reason is shown before you save.

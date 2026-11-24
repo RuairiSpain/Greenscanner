@@ -259,6 +259,91 @@ final class GreenSightTests: XCTestCase {
         XCTAssertEqual(decoded.edge.count, 4)
     }
 
+    // MARK: Merging
+
+    /// Asymmetric L-shaped green in world metres.
+    private let lShape: [SIMD2<Float>] = [SIMD2(0, 0), SIMD2(12, 0), SIMD2(12, 5), SIMD2(5, 5), SIMD2(5, 10), SIMD2(0, 10)]
+
+    private func worldHeight(_ p: SIMD2<Float>) -> Float { 0.02 * p.x + 0.01 * p.y }
+
+    /// Simulates a scan taken in a frame rotated by `angle` and shifted by `origin` from the world frame.
+    private func syntheticScan(angle: Float, origin: SIMD2<Float>, verticalOffset: Float,
+                               quality: Double = 0.8, clip: ((SIMD2<Float>) -> Bool)? = nil) -> GreenMapRecord {
+        let c = cos(angle), s = sin(angle)
+        func toWorld(_ l: SIMD2<Float>) -> SIMD2<Float> { SIMD2(c * l.x - s * l.y, s * l.x + c * l.y) + origin }
+        func toLocal(_ w: SIMD2<Float>) -> SIMD2<Float> {
+            let d = w - origin
+            return SIMD2(c * d.x + s * d.y, -s * d.x + c * d.y)
+        }
+        let polygon = lShape.map(toLocal)
+        let size: Float = 0.2
+        var cells: [MapCell] = []
+        let bounds = GreenGeometry.bounds(polygon)!
+        for ix in Int(floor(bounds.min.x / size))...Int(floor(bounds.max.x / size)) {
+            for iz in Int(floor(bounds.min.y / size))...Int(floor(bounds.max.y / size)) {
+                let local = SIMD2<Float>((Float(ix) + 0.5) * size, (Float(iz) + 0.5) * size)
+                guard GreenGeometry.contains(polygon, point: local) else { continue }
+                let world = toWorld(local)
+                if let clip, !clip(world) { continue }
+                cells.append(MapCell(ix: ix, iz: iz, height: worldHeight(world) + verticalOffset, observations: 10, bestRange: 1.5))
+            }
+        }
+        return GreenMapRecord(id: UUID(), courseName: "Test", holeNumber: 1, createdAt: Date(), cellSize: size,
+                              edge: polygon.map { EdgePoint(x: $0.x, z: $0.y) }, cells: cells, coverage: 0.9,
+                              qualityScore: quality, driftMillimetres: nil, trackingLossCount: 0, isPartial: false,
+                              headingAligned: false, originLatitude: nil, originLongitude: nil)
+    }
+
+    func testAlignmentRecoversRotationAndShift() throws {
+        let reference = syntheticScan(angle: 0, origin: .zero, verticalOffset: 0)
+        let other = syntheticScan(angle: 40 * .pi / 180, origin: SIMD2(3, 2), verticalOffset: 0)
+        let alignment = try XCTUnwrap(GreenAligner.align(source: other.edgeVector, sourceAligned: false,
+                                                         target: reference.edgeVector, targetAligned: false))
+        // Each L-shape vertex of the other scan must land on the matching world vertex.
+        for (local, world) in zip(other.edgeVector, lShape) {
+            XCTAssertLessThan(simd_distance(alignment.apply(local), world), 0.6)
+        }
+        XCTAssertGreaterThan(alignment.overlap, 0.85)
+    }
+
+    func testMergeCombinesTwoScansAndCorrectsHeightOffset() throws {
+        // The second scan only saw the left part, so the merge must keep cells from both.
+        let first = syntheticScan(angle: 0, origin: .zero, verticalOffset: 0, quality: 0.9) { $0.x > 3 }
+        let second = syntheticScan(angle: 40 * .pi / 180, origin: SIMD2(3, 2), verticalOffset: 0.05, quality: 0.7) { $0.x < 9 }
+        let result = try GreenMerger.merge([second, first])
+        XCTAssertEqual(result.usedCount, 2)
+        XCTAssertEqual(result.record.sourceScanCount, 2)
+        let full = syntheticScan(angle: 0, origin: .zero, verticalOffset: 0)
+        XCTAssertGreaterThan(result.record.cells.count, first.cells.count)
+        XCTAssertGreaterThan(Double(result.record.cells.count), Double(full.cells.count) * 0.9)
+        // Merged heights are in the best scan's frame, which here is the world frame.
+        for cell in result.record.cells {
+            let world = SIMD2<Float>((Float(cell.ix) + 0.5) * 0.2, (Float(cell.iz) + 0.5) * 0.2)
+            XCTAssertEqual(cell.height, worldHeight(world), accuracy: 0.02)
+        }
+        XCTAssertFalse(GreenGeometry.selfIntersects(result.record.edgeVector))
+        XCTAssertEqual(GreenGeometry.area(result.record.edgeVector), GreenGeometry.area(lShape), accuracy: GreenGeometry.area(lShape) * 0.1)
+    }
+
+    func testMergeRejectsNonOverlappingGreens() {
+        let a = syntheticScan(angle: 0, origin: .zero, verticalOffset: 0)
+        let squareOutline: [EdgePoint] = [EdgePoint(x: 0, z: 0), EdgePoint(x: 3, z: 0), EdgePoint(x: 3, z: 3), EdgePoint(x: 0, z: 3)]
+        let b = GreenMapRecord(id: UUID(), courseName: "Test", holeNumber: 1, createdAt: Date(), cellSize: 0.2,
+                               edge: squareOutline, cells: [MapCell(ix: 1, iz: 1, height: 0, observations: 5, bestRange: 1)],
+                               coverage: 0.1, qualityScore: 0.1, driftMillimetres: nil, trackingLossCount: 0,
+                               isPartial: true, headingAligned: false, originLatitude: nil, originLongitude: nil)
+        XCTAssertThrowsError(try GreenMerger.merge([a, b]))
+    }
+
+    func testOutlineUnionOfOverlappingSquares() throws {
+        let first: [SIMD2<Float>] = [SIMD2(0, 0), SIMD2(4, 0), SIMD2(4, 4), SIMD2(0, 4)]
+        let second: [SIMD2<Float>] = [SIMD2(2, 0), SIMD2(6, 0), SIMD2(6, 4), SIMD2(2, 4)]
+        let union = try XCTUnwrap(GreenOutline.union(polygons: [first, second], cellSize: 0.2))
+        XCTAssertEqual(GreenGeometry.area(union.outline), 24, accuracy: 1.5)
+        XCTAssertFalse(GreenGeometry.selfIntersects(union.outline))
+        XCTAssertLessThan(union.outline.count, 12)
+    }
+
     private func fixtureSurface(height: (Double, Double) -> Float) -> HeightMapSnapshot {
         let size: Float = 0.03
         var cells: [HeightCell] = []

@@ -6,6 +6,12 @@ import CoreLocation
 import simd
 
 /// State for "Map a Green" mode. Independent of the putt reader's AppModel.
+enum MergeStatus {
+    case working
+    case failed(String)
+    case ready(MergeResult)
+}
+
 final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
     // Setup
     @Published var courseName = ""
@@ -13,6 +19,7 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
     @Published var setupError: String?
     @Published var importError: String?
     @Published var records: [GreenMapRecord] = []
+    @Published var mergeStatus: MergeStatus?
 
     // Mapping
     @Published var isMapping = false
@@ -82,6 +89,47 @@ final class MapModel: NSObject, ObservableObject, ARSessionDelegate {
     func nextUnmappedHole(for course: String) -> Int {
         let mapped = Set(records.filter { $0.courseName == course }.map(\.holeNumber))
         return (1...18).first { !mapped.contains($0) } ?? 1
+    }
+
+    /// Holes of a course that have more than one saved scan, with the scan counts.
+    func mergeableHoles(course: String) -> [(hole: Int, count: Int)] {
+        Dictionary(grouping: records.filter { $0.courseName == course }, by: \.holeNumber)
+            .filter { $0.value.count >= 2 }
+            .map { (hole: $0.key, count: $0.value.count) }
+            .sorted { $0.hole < $1.hole }
+    }
+
+    @MainActor
+    func startMerge(course: String, hole: Int) {
+        let inputs = records.filter { $0.courseName == course && $0.holeNumber == hole }
+        guard inputs.count >= 2 else { return }
+        mergeStatus = .working
+        processingQueue.async { [weak self] in
+            let status: MergeStatus
+            do {
+                status = .ready(try GreenMerger.merge(inputs))
+            } catch {
+                status = .failed(error.localizedDescription)
+            }
+            DispatchQueue.main.async { self?.mergeStatus = status }
+        }
+    }
+
+    @MainActor
+    func dismissMerge() { mergeStatus = nil }
+
+    @MainActor
+    func saveMerged(_ result: MergeResult, removeSources: Bool) {
+        records.insert(result.record, at: 0)
+        let store = self.store
+        let record = result.record
+        let removed = removeSources ? (record.sourceIDs ?? []) : []
+        if removeSources { records.removeAll { removed.contains($0.id) } }
+        persistenceQueue.async {
+            store.save(record)
+            removed.forEach { store.delete($0) }
+        }
+        mergeStatus = nil
     }
 
     @MainActor

@@ -63,6 +63,9 @@ struct GreenMapRecord: Codable, Identifiable, Sendable {
     let headingAligned: Bool
     let originLatitude: Double?
     let originLongitude: Double?
+    /// Set on merged greens: the scans that were combined.
+    var sourceIDs: [UUID]? = nil
+    var sourceScanCount: Int? = nil
 
     var edgeVector: [SIMD2<Float>] { edge.map(\.vector) }
 }

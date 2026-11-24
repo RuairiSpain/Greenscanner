@@ -15,6 +15,12 @@ struct MapHomeView: View {
         var id: String { course }
     }
 
+    private struct MergeableHole: Identifiable {
+        let hole: Int
+        let count: Int
+        var id: Int { hole }
+    }
+
     private var groupedCourses: [CourseGroup] {
         Dictionary(grouping: model.records, by: \.courseName)
             .map { CourseGroup(course: $0.key, records: $0.value.sorted { $0.holeNumber < $1.holeNumber }) }
@@ -62,6 +68,13 @@ struct MapHomeView: View {
                             } label: { row(record) }
                         }
                         .onDelete { offsets in model.delete(offsets.map { group.records[$0].id }) }
+                        ForEach(model.mergeableHoles(course: group.course).map { MergeableHole(hole: $0.hole, count: $0.count) }) { item in
+                            Button {
+                                model.startMerge(course: group.course, hole: item.hole)
+                            } label: {
+                                Label("Merge \(item.count) scans of hole \(item.hole)", systemImage: "square.on.square")
+                            }
+                        }
                     }
                 }
             }
@@ -78,6 +91,10 @@ struct MapHomeView: View {
                                                           set: { if !$0 { model.importError = nil } })) {
                 Button("OK", role: .cancel) {}
             } message: { Text(model.importError ?? "") }
+            .sheet(isPresented: Binding(get: { model.mergeStatus != nil },
+                                        set: { if !$0 { model.dismissMerge() } })) {
+                MergeSheet().environmentObject(model)
+            }
             .onAppear { model.location.start() }
             .fullScreenCover(isPresented: $model.isMapping) {
                 MapScanScreen().environmentObject(model)
@@ -127,6 +144,9 @@ struct GreenDetailView: View {
                 LabeledContent("Tracking losses", value: "\(record.trackingLossCount)")
                 LabeledContent("Cells", value: "\(record.cells.count)")
                 LabeledContent("North-aligned", value: record.headingAligned ? "Yes" : "No")
+                if let count = record.sourceScanCount {
+                    LabeledContent("Merged from", value: "\(count) scans")
+                }
             }
             if let url = exportURL {
                 Section { ShareLink(item: url) { Label("Export green file", systemImage: "square.and.arrow.up") } }
@@ -134,6 +154,53 @@ struct GreenDetailView: View {
         }
         .navigationTitle("\(record.courseName) \(record.holeNumber)")
         .task { exportURL = await model.prepareExport(record) }
+    }
+}
+
+// MARK: Merge sheet
+
+struct MergeSheet: View {
+    @EnvironmentObject private var model: MapModel
+    @State private var removeSources = false
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                switch model.mergeStatus {
+                case .working, .none:
+                    ProgressView("Aligning scans…").frame(maxWidth: .infinity, maxHeight: .infinity)
+                case .failed(let message):
+                    ContentUnavailableView("Could not merge", systemImage: "exclamationmark.triangle",
+                                           description: Text(message))
+                case .ready(let result):
+                    List {
+                        Section { MapSlopeView(record: result.record).listRowInsets(EdgeInsets()) }
+                        Section("Result") {
+                            LabeledContent("Scans combined", value: "\(result.usedCount)")
+                            LabeledContent("Coverage", value: result.record.coverage.formatted(.percent.precision(.fractionLength(0))))
+                            LabeledContent("Quality", value: result.record.qualityScore.formatted(.percent.precision(.fractionLength(0))))
+                            LabeledContent("Outline overlap", value: result.minimumOverlap.formatted(.percent.precision(.fractionLength(0))))
+                            if let residual = result.residualMillimetres {
+                                LabeledContent("Scan disagreement", value: String(format: "%.0f mm", residual))
+                            }
+                        }
+                        if !result.skipped.isEmpty {
+                            Section("Not used") { ForEach(result.skipped, id: \.self) { Text($0).font(.caption) } }
+                        }
+                        Section {
+                            Toggle("Delete the \(result.usedCount) source scans after saving", isOn: $removeSources)
+                            Button("Save merged green") { model.saveMerged(result, removeSources: removeSources) }
+                                .fontWeight(.semibold)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Merge scans")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { model.dismissMerge() } }
+            }
+        }
     }
 }
 
